@@ -36,7 +36,7 @@ Before writing a long prompt explaining how to do something, check if there's al
 
 ### Multi-Line Input
 
-Press **Alt+Enter** (or **Ctrl+J**) to insert a newline without sending. This lets you compose multi-line prompts, paste code blocks, or structure complex requests before hitting Enter to send.
+Press **Alt+Enter**, **Ctrl+J**, or **Shift+Enter** to insert a newline without sending. `Shift+Enter` only works when the terminal sends it as a distinct keystroke (Kitty / foot / WezTerm / Ghostty by default; iTerm2 / Alacritty / VS Code terminal once the Kitty keyboard protocol is enabled). The other two work in every terminal.
 
 ### Paste Detection
 
@@ -78,7 +78,9 @@ Create an `AGENTS.md` in your project root with architecture decisions, coding c
 
 ### SOUL.md: Customize Personality
 
-Want the agent to be more concise? More technical? Place a `SOUL.md` in your project root or `~/.hermes/SOUL.md` for global personality customization. This shapes the agent's tone and communication style.
+Want Hermes to have a stable default voice? Edit `~/.hermes/SOUL.md` (or `$HERMES_HOME/SOUL.md` if you use a custom Hermes home). Hermes now seeds a starter SOUL automatically and uses that global file as the instance-wide personality source.
+
+For a full walkthrough, see [Use SOUL.md with Hermes](/docs/guides/use-soul-with-hermes).
 
 ```markdown
 # Soul
@@ -87,13 +89,15 @@ Skip explanations unless asked. Prefer one-liners over verbose solutions.
 Always consider error handling and edge cases.
 ```
 
+Use `SOUL.md` for durable personality. Use `AGENTS.md` for project-specific instructions.
+
 ### .cursorrules Compatibility
 
 Already have a `.cursorrules` or `.cursor/rules/*.mdc` file? Hermes reads those too. No need to duplicate your coding conventions — they're loaded automatically from the working directory.
 
-### Hierarchical Discovery
+### Discovery
 
-Hermes walks the directory tree and discovers **all** `AGENTS.md` files at every level. In a monorepo, put project-wide conventions at the root and team-specific ones in subdirectories — they're all concatenated together with path headers.
+Hermes loads the top-level `AGENTS.md` from the current working directory at session start. Subdirectory `AGENTS.md` files are discovered lazily during tool calls (via `subdirectory_hints.py`) and injected into tool results — they are not loaded upfront into the system prompt.
 
 :::tip
 Keep context files focused and concise. Every character counts against your token budget since they're injected into every single message.
@@ -166,7 +170,7 @@ Instead of manually collecting user IDs for allowlists, enable DM pairing. When 
 Use `/verbose` to control how much tool activity you see. In messaging platforms, less is usually more — keep it on "new" to see just new tool calls. In the CLI, "all" gives you a satisfying live view of everything the agent does.
 
 :::tip
-On messaging platforms, sessions auto-reset after idle time (default: 120 min) or daily at 4 AM. Adjust per-platform in `~/.hermes/gateway.json` if you need longer sessions.
+On messaging platforms, sessions auto-reset after idle time (default: 24 hours) or daily at 4 AM. Adjust per-platform in `~/.hermes/config.yaml` if you need longer sessions.
 :::
 
 ## Security
@@ -180,6 +184,25 @@ When working with untrusted repositories or running unfamiliar code, use Docker 
 TERMINAL_BACKEND=docker
 TERMINAL_DOCKER_IMAGE=hermes-sandbox:latest
 ```
+
+### Avoid Windows Encoding Pitfalls
+
+On Windows, some default encodings (such as `cp125x`) cannot represent all Unicode characters, which can cause `UnicodeEncodeError` when writing files in tests or scripts.
+
+- Prefer opening files with an explicit UTF-8 encoding:
+
+```python
+with open("results.txt", "w", encoding="utf-8") as f:
+    f.write("✓ All good\n")
+```
+
+- In PowerShell, you can also switch the current session to UTF-8 for console and native command output:
+
+```powershell
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+```
+
+This keeps PowerShell and child processes on UTF-8 and helps avoid Windows-only failures.
 
 ### Review Before Choosing "Always"
 

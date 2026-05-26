@@ -25,8 +25,8 @@ Architecture:
 3. Multiple layers can be used for iterative refinement (future enhancement)
 
 Models Used (via OpenRouter):
-- Reference Models: claude-opus-4, gemini-2.5-pro, gpt-4.1, deepseek-r1
-- Aggregator Model: claude-opus-4 (highest capability for synthesis)
+- Reference Models: claude-opus-4.6, gemini-3-pro-preview, gpt-5.4-pro, deepseek-v3.2
+- Aggregator Model: claude-opus-4.6 (highest capability for synthesis)
 
 Configuration:
     To customize the MoA setup, modify the configuration constants at the top of this file:
@@ -52,21 +52,25 @@ import asyncio
 import datetime
 from typing import Dict, Any, List, Optional
 from tools.openrouter_client import get_async_client as _get_openrouter_client, check_api_key as check_openrouter_api_key
+from agent.auxiliary_client import extract_content_or_reasoning
 from tools.debug_helpers import DebugSession
+import sys
 
 logger = logging.getLogger(__name__)
 
 # Configuration for MoA processing
-# Reference models - these generate diverse initial responses in parallel (OpenRouter slugs)
+# Reference models - these generate diverse initial responses in parallel.
+# Keep this list aligned with current top-tier OpenRouter frontier options.
 REFERENCE_MODELS = [
-    "anthropic/claude-opus-4.5",
-    "google/gemini-3-pro-preview", 
-    "openai/gpt-5.2-pro",
-    "deepseek/deepseek-v3.2"
+    "anthropic/claude-opus-4.6",
+    "google/gemini-2.5-pro",
+    "openai/gpt-5.4-pro",
+    "deepseek/deepseek-v3.2",
 ]
 
-# Aggregator model - synthesizes reference responses into final output
-AGGREGATOR_MODEL = "anthropic/claude-opus-4.5"  # Use highest capability model for aggregation
+# Aggregator model - synthesizes reference responses into final output.
+# Prefer the strongest synthesis model in the current OpenRouter lineup.
+AGGREGATOR_MODEL = "anthropic/claude-opus-4.6"
 
 # Temperature settings optimized for MoA performance
 REFERENCE_TEMPERATURE = 0.6  # Balanced creativity for diverse perspectives
@@ -126,6 +130,7 @@ async def _run_reference_model_safe(
             api_params = {
                 "model": model,
                 "messages": [{"role": "user", "content": user_prompt}],
+                "max_tokens": max_tokens,
                 "extra_body": {
                     "reasoning": {
                         "enabled": True,
@@ -141,20 +146,27 @@ async def _run_reference_model_safe(
             
             response = await _get_openrouter_client().chat.completions.create(**api_params)
             
-            content = response.choices[0].message.content.strip()
+            content = extract_content_or_reasoning(response)
+            if not content:
+                # Reasoning-only response — let the retry loop handle it
+                logger.warning("%s returned empty content (attempt %s/%s), retrying", model, attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(min(2 ** (attempt + 1), 60))
+                    continue
             logger.info("%s responded (%s characters)", model, len(content))
             return model, content, True
             
         except Exception as e:
             error_str = str(e)
-            # Log more detailed error information for debugging
+            # Keep retry-path logging concise; full tracebacks are reserved for
+            # terminal failure paths so long-running MoA retries don't flood logs.
             if "invalid" in error_str.lower():
                 logger.warning("%s invalid request error (attempt %s): %s", model, attempt + 1, error_str)
             elif "rate" in error_str.lower() or "limit" in error_str.lower():
                 logger.warning("%s rate limit error (attempt %s): %s", model, attempt + 1, error_str)
             else:
                 logger.warning("%s unknown error (attempt %s): %s", model, attempt + 1, error_str)
-                
+
             if attempt < max_retries - 1:
                 # Exponential backoff for rate limiting: 2s, 4s, 8s, 16s, 32s, 60s
                 sleep_time = min(2 ** (attempt + 1), 60)
@@ -162,7 +174,7 @@ async def _run_reference_model_safe(
                 await asyncio.sleep(sleep_time)
             else:
                 error_msg = f"{model} failed after {max_retries} attempts: {error_str}"
-                logger.error("%s", error_msg)
+                logger.error("%s", error_msg, exc_info=True)
                 return model, error_msg, False
 
 
@@ -185,7 +197,7 @@ async def _run_aggregator_model(
         str: Synthesized final response
     """
     logger.info("Running aggregator model: %s", AGGREGATOR_MODEL)
-    
+
     # Build parameters for the API call
     api_params = {
         "model": AGGREGATOR_MODEL,
@@ -193,6 +205,7 @@ async def _run_aggregator_model(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
+        "max_tokens": max_tokens,
         "extra_body": {
             "reasoning": {
                 "enabled": True,
@@ -200,15 +213,22 @@ async def _run_aggregator_model(
             }
         }
     }
-    
+
     # GPT models (especially gpt-4o-mini) don't support custom temperature values
     # Only include temperature for non-GPT models
     if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
         api_params["temperature"] = temperature
-    
+
     response = await _get_openrouter_client().chat.completions.create(**api_params)
-    
-    content = response.choices[0].message.content.strip()
+
+    content = extract_content_or_reasoning(response)
+
+    # Retry once on empty content (reasoning-only response)
+    if not content:
+        logger.warning("Aggregator returned empty content, retrying once")
+        response = await _get_openrouter_client().chat.completions.create(**api_params)
+        content = extract_content_or_reasoning(response)
+
     logger.info("Aggregation complete (%s characters)", len(content))
     return content
 
@@ -364,7 +384,7 @@ async def mixture_of_agents_tool(
         
     except Exception as e:
         error_msg = f"Error in MoA processing: {str(e)}"
-        logger.error("%s", error_msg)
+        logger.error("%s", error_msg, exc_info=True)
         
         # Calculate processing time even for errors
         end_time = datetime.datetime.now()
@@ -399,29 +419,6 @@ def check_moa_requirements() -> bool:
     return check_openrouter_api_key()
 
 
-def get_debug_session_info() -> Dict[str, Any]:
-    """
-    Get information about the current debug session.
-    
-    Returns:
-        Dict[str, Any]: Dictionary containing debug session information
-    """
-    return _debug.get_session_info()
-
-
-def get_available_models() -> Dict[str, List[str]]:
-    """
-    Get information about available models for MoA processing.
-    
-    Returns:
-        Dict[str, List[str]]: Dictionary with reference and aggregator models
-    """
-    return {
-        "reference_models": REFERENCE_MODELS,
-        "aggregator_models": [AGGREGATOR_MODEL],
-        "supported_models": REFERENCE_MODELS + [AGGREGATOR_MODEL]
-    }
-
 
 def get_moa_configuration() -> Dict[str, Any]:
     """
@@ -455,7 +452,7 @@ if __name__ == "__main__":
         print("❌ OPENROUTER_API_KEY environment variable not set")
         print("Please set your API key: export OPENROUTER_API_KEY='your-key-here'")
         print("Get API key at: https://openrouter.ai/")
-        exit(1)
+        sys.exit(1)
     else:
         print("✅ OpenRouter API key found")
     
@@ -463,7 +460,7 @@ if __name__ == "__main__":
     
     # Show current configuration
     config = get_moa_configuration()
-    print(f"\n⚙️  Current Configuration:")
+    print("\n⚙️  Current Configuration:")
     print(f"  🤖 Reference models ({len(config['reference_models'])}): {', '.join(config['reference_models'])}")
     print(f"  🧠 Aggregator model: {config['aggregator_model']}")
     print(f"  🌡️  Reference temperature: {config['reference_temperature']}")
@@ -503,7 +500,7 @@ if __name__ == "__main__":
     print(f"  - Optimized temperatures: {REFERENCE_TEMPERATURE} for reference models, {AGGREGATOR_TEMPERATURE} for aggregation")
     print("  - Token-efficient: only returns final aggregated response")
     print("  - Resilient: continues with partial model failures")
-    print(f"  - Configurable: easy to modify models and settings at top of file")
+    print("  - Configurable: easy to modify models and settings at top of file")
     print("  - State-of-the-art results on challenging benchmarks")
     
     print("\nDebug mode:")
@@ -541,4 +538,5 @@ registry.register(
     check_fn=check_moa_requirements,
     requires_env=["OPENROUTER_API_KEY"],
     is_async=True,
+    emoji="🧠",
 )

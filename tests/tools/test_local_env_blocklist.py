@@ -1,10 +1,11 @@
-"""Tests for provider env var blocklist in LocalEnvironment.
+"""Tests for subprocess env sanitization in LocalEnvironment.
 
-Verifies that Hermes-internal provider env vars (OPENAI_BASE_URL, etc.)
-are stripped from subprocess environments so external CLIs are not
-silently misrouted.
+Verifies that Hermes-managed provider, tool, and gateway env vars are
+stripped from subprocess environments so external CLIs are not silently
+misrouted or handed Hermes secrets.
 
 See: https://github.com/NousResearch/hermes-agent/issues/1002
+See: https://github.com/NousResearch/hermes-agent/issues/1264
 """
 
 import os
@@ -25,8 +26,7 @@ def _make_fake_popen(captured: dict):
         proc = MagicMock()
         proc.poll.return_value = 0
         proc.returncode = 0
-        proc.stdout = iter([])
-        proc.stdout.close = lambda: None
+        proc.stdout = MagicMock(__iter__=lambda s: iter([]), __next__=lambda s: (_ for _ in ()).throw(StopIteration))
         proc.stdin = MagicMock()
         return proc
     return fake_popen
@@ -85,10 +85,61 @@ class TestProviderEnvBlocklist:
             "KIMI_API_KEY": "kimi-key",
             "MINIMAX_API_KEY": "mm-key",
             "MINIMAX_CN_API_KEY": "mmcn-key",
+            "DEEPSEEK_API_KEY": "deepseek-key",
+            "NVIDIA_API_KEY": "nvidia-key",
         }
         result_env = _run_with_env(extra_os_env=registry_vars)
 
         for var in registry_vars:
+            assert var not in result_env, f"{var} leaked into subprocess env"
+
+    def test_non_registry_provider_vars_are_stripped(self):
+        """Extra provider vars not in PROVIDER_REGISTRY must also be blocked."""
+        extra_provider_vars = {
+            "GOOGLE_API_KEY": "google-key",
+            "MISTRAL_API_KEY": "mistral-key",
+            "GROQ_API_KEY": "groq-key",
+            "TOGETHER_API_KEY": "together-key",
+            "PERPLEXITY_API_KEY": "perplexity-key",
+            "COHERE_API_KEY": "cohere-key",
+            "FIREWORKS_API_KEY": "fireworks-key",
+            "XAI_API_KEY": "xai-key",
+            "HELICONE_API_KEY": "helicone-key",
+        }
+        result_env = _run_with_env(extra_os_env=extra_provider_vars)
+
+        for var in extra_provider_vars:
+            assert var not in result_env, f"{var} leaked into subprocess env"
+
+    def test_tool_and_gateway_vars_are_stripped(self):
+        """Tool and gateway secrets/config must not leak into subprocess env."""
+        leaked_vars = {
+            "TELEGRAM_BOT_TOKEN": "bot-token",
+            "TELEGRAM_HOME_CHANNEL": "12345",
+            "DISCORD_HOME_CHANNEL": "67890",
+            "SLACK_APP_TOKEN": "xapp-secret",
+            "WHATSAPP_ALLOWED_USERS": "+15555550123",
+            "SIGNAL_ACCOUNT": "+15555550124",
+            "HASS_TOKEN": "ha-secret",
+            "EMAIL_PASSWORD": "email-secret",
+            "FIRECRAWL_API_KEY": "fc-secret",
+            "BROWSERBASE_PROJECT_ID": "bb-project",
+            "ELEVENLABS_API_KEY": "el-secret",
+            "GITHUB_TOKEN": "ghp_secret",
+            "GH_TOKEN": "gh_alias_secret",
+            "GATEWAY_ALLOW_ALL_USERS": "true",
+            "GATEWAY_ALLOWED_USERS": "alice,bob",
+            "MODAL_TOKEN_ID": "modal-id",
+            "MODAL_TOKEN_SECRET": "modal-secret",
+            "DAYTONA_API_KEY": "daytona-key",
+            "VERCEL_OIDC_TOKEN": "vercel-oidc-token",
+            "VERCEL_TOKEN": "vercel-token",
+            "VERCEL_PROJECT_ID": "vercel-project",
+            "VERCEL_TEAM_ID": "vercel-team",
+        }
+        result_env = _run_with_env(extra_os_env=leaked_vars)
+
+        for var in leaked_vars:
             assert var not in result_env, f"{var} leaked into subprocess env"
 
     def test_safe_vars_are_preserved(self):
@@ -171,3 +222,109 @@ class TestBlocklistCoverage:
         must also be in the blocklist."""
         extras = {"ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+    def test_non_registry_provider_vars_are_in_blocklist(self):
+        extras = {
+            "GOOGLE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MISTRAL_API_KEY",
+            "GROQ_API_KEY",
+            "TOGETHER_API_KEY",
+            "PERPLEXITY_API_KEY",
+            "COHERE_API_KEY",
+            "FIREWORKS_API_KEY",
+            "XAI_API_KEY",
+            "HELICONE_API_KEY",
+        }
+        assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+    def test_optional_tool_and_messaging_vars_are_in_blocklist(self):
+        """Tool/messaging vars from OPTIONAL_ENV_VARS should stay covered."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        for name, metadata in OPTIONAL_ENV_VARS.items():
+            category = metadata.get("category")
+            if category in {"tool", "messaging"}:
+                assert name in _HERMES_PROVIDER_ENV_BLOCKLIST, (
+                    f"Optional env var {name} (category={category}) missing from blocklist"
+                )
+            elif category == "setting" and metadata.get("password"):
+                assert name in _HERMES_PROVIDER_ENV_BLOCKLIST, (
+                    f"Secret setting env var {name} missing from blocklist"
+                )
+
+    def test_gateway_runtime_vars_are_in_blocklist(self):
+        extras = {
+            "TELEGRAM_HOME_CHANNEL",
+            "TELEGRAM_HOME_CHANNEL_NAME",
+            "DISCORD_HOME_CHANNEL",
+            "DISCORD_HOME_CHANNEL_NAME",
+            "DISCORD_REQUIRE_MENTION",
+            "DISCORD_FREE_RESPONSE_CHANNELS",
+            "DISCORD_AUTO_THREAD",
+            "SLACK_HOME_CHANNEL",
+            "SLACK_HOME_CHANNEL_NAME",
+            "SLACK_ALLOWED_USERS",
+            "WHATSAPP_ENABLED",
+            "WHATSAPP_MODE",
+            "WHATSAPP_ALLOWED_USERS",
+            "SIGNAL_HTTP_URL",
+            "SIGNAL_ACCOUNT",
+            "SIGNAL_ALLOWED_USERS",
+            "SIGNAL_GROUP_ALLOWED_USERS",
+            "SIGNAL_HOME_CHANNEL",
+            "SIGNAL_HOME_CHANNEL_NAME",
+            "SIGNAL_IGNORE_STORIES",
+            "HASS_TOKEN",
+            "HASS_URL",
+            "EMAIL_ADDRESS",
+            "EMAIL_PASSWORD",
+            "EMAIL_IMAP_HOST",
+            "EMAIL_SMTP_HOST",
+            "EMAIL_HOME_ADDRESS",
+            "EMAIL_HOME_ADDRESS_NAME",
+            "GATEWAY_ALLOWED_USERS",
+            "GH_TOKEN",
+            "GITHUB_APP_ID",
+            "GITHUB_APP_PRIVATE_KEY_PATH",
+            "GITHUB_APP_INSTALLATION_ID",
+            "MODAL_TOKEN_ID",
+            "MODAL_TOKEN_SECRET",
+            "DAYTONA_API_KEY",
+            "VERCEL_OIDC_TOKEN",
+            "VERCEL_TOKEN",
+            "VERCEL_PROJECT_ID",
+            "VERCEL_TEAM_ID",
+        }
+        assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+
+class TestSanePathIncludesHomebrew:
+    """Verify _SANE_PATH includes macOS Homebrew directories."""
+
+    def test_sane_path_includes_homebrew_bin(self):
+        from tools.environments.local import _SANE_PATH
+        assert "/opt/homebrew/bin" in _SANE_PATH
+
+    def test_sane_path_includes_homebrew_sbin(self):
+        from tools.environments.local import _SANE_PATH
+        assert "/opt/homebrew/sbin" in _SANE_PATH
+
+    def test_make_run_env_appends_homebrew_on_minimal_path(self):
+        """When PATH is minimal (no /usr/bin), _make_run_env should append
+        _SANE_PATH which now includes Homebrew dirs."""
+        from tools.environments.local import _make_run_env
+        minimal_env = {"PATH": "/some/custom/bin"}
+        with patch.dict(os.environ, minimal_env, clear=True):
+            result = _make_run_env({})
+        assert "/opt/homebrew/bin" in result["PATH"]
+        assert "/opt/homebrew/sbin" in result["PATH"]
+
+    def test_make_run_env_does_not_duplicate_on_full_path(self):
+        """When PATH already has /usr/bin, _make_run_env should not append."""
+        from tools.environments.local import _make_run_env
+        full_env = {"PATH": "/usr/bin:/bin"}
+        with patch.dict(os.environ, full_env, clear=True):
+            result = _make_run_env({})
+        # Should keep existing PATH unchanged
+        assert result["PATH"] == "/usr/bin:/bin"

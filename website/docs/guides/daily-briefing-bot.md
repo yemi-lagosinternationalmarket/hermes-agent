@@ -1,5 +1,5 @@
 ---
-sidebar_position: 2
+sidebar_position: 3
 title: "Tutorial: Daily Briefing Bot"
 description: "Build an automated daily briefing bot that researches topics, summarizes findings, and delivers them to Telegram or Discord every morning"
 ---
@@ -29,7 +29,8 @@ Before starting, make sure you have:
 - **Hermes Agent installed** — see the [Installation guide](/docs/getting-started/installation)
 - **Gateway running** — the gateway daemon handles cron execution:
   ```bash
-  hermes gateway install   # Install as system service (recommended)
+  hermes gateway install   # Install as a user service
+  sudo hermes gateway install --system   # Linux servers: boot-time system service
   # or
   hermes gateway           # Run in foreground
   ```
@@ -89,6 +90,8 @@ Try different prompts until you get output you love. Add instructions like "use 
 
 Now let's schedule this to run automatically every morning. You can do this in two ways.
 
+Before creating cron jobs, ensure Hermes has a default model and provider configured globally. If you want a specific job to use different values, set explicit per-job model/provider overrides when creating it.
+
 ### Option A: Natural Language (in chat)
 
 Just tell Hermes what you want:
@@ -99,7 +102,7 @@ and open source LLMs. Summarize the top 3 stories in a concise briefing
 with links. Use a friendly, professional tone. Deliver to telegram.
 ```
 
-Hermes will create the cron job for you using the `schedule_cronjob` tool.
+Hermes will create the cron job for you using the unified `cronjob` tool.
 
 ### Option B: CLI Slash Command
 
@@ -232,7 +235,7 @@ Or ask conversationally:
 Remove my morning briefing cron job.
 ```
 
-Hermes will use `list_cronjobs` to find it and `remove_cronjob` to delete it.
+Hermes will use `cronjob(action="list")` to find it and `cronjob(action="remove")` to delete it.
 
 ### Check Gateway Status
 
@@ -242,10 +245,12 @@ Make sure the scheduler is actually running:
 hermes cron status
 ```
 
-If the gateway isn't running, your jobs won't execute. Install it as a system service for reliability:
+If the gateway isn't running, your jobs won't execute. Install it as a background service for reliability:
 
 ```bash
 hermes gateway install
+# or on Linux servers
+sudo hermes gateway install --system
 ```
 
 ## Going Further

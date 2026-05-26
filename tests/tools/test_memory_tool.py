@@ -9,7 +9,22 @@ from tools.memory_tool import (
     memory_tool,
     _scan_memory_content,
     ENTRY_DELIMITER,
+    MEMORY_SCHEMA,
 )
+
+
+# =========================================================================
+# Tool schema guidance
+# =========================================================================
+
+class TestMemorySchema:
+    def test_discourages_diary_style_task_logs(self):
+        description = MEMORY_SCHEMA["description"]
+        assert "Do NOT save task progress" in description
+        assert "session_search" in description
+        assert "like a diary" not in description
+        assert "temporary task state" in description
+        assert ">80%" not in description
 
 
 # =========================================================================
@@ -77,7 +92,7 @@ class TestScanMemoryContent:
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     """Create a MemoryStore with temp storage."""
-    monkeypatch.setattr("tools.memory_tool.MEMORY_DIR", tmp_path)
+    monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
     s = MemoryStore(memory_char_limit=500, user_char_limit=300)
     s.load_from_disk()
     return s
@@ -170,7 +185,7 @@ class TestMemoryStoreRemove:
 
 class TestMemoryStorePersistence:
     def test_save_and_load_roundtrip(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.memory_tool.MEMORY_DIR", tmp_path)
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
 
         store1 = MemoryStore()
         store1.load_from_disk()
@@ -183,7 +198,7 @@ class TestMemoryStorePersistence:
         assert "Alice, developer" in store2.user_entries
 
     def test_deduplication_on_load(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.memory_tool.MEMORY_DIR", tmp_path)
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
         # Write file with duplicates
         mem_file = tmp_path / "MEMORY.md"
         mem_file.write_text("duplicate entry\n§\nduplicate entry\n§\nunique entry")

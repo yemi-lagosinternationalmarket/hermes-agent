@@ -11,9 +11,10 @@ handler are thin wrappers that parse args and delegate.
 """
 
 import json
+import re
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -21,6 +22,7 @@ from rich.table import Table
 
 # Lazy imports to avoid circular dependencies and slow startup.
 # tools.skills_hub and tools.skills_guard are imported inside functions.
+from hermes_constants import display_hermes_home
 
 _console = Console()
 
@@ -76,6 +78,167 @@ def _resolve_short_name(name: str, sources, console: Console) -> str:
     return ""
 
 
+def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    if not extra:
+        return lines
+
+    if extra.get("repo_url"):
+        lines.append(f"[bold]Repo:[/] {extra['repo_url']}")
+    if extra.get("detail_url"):
+        lines.append(f"[bold]Detail Page:[/] {extra['detail_url']}")
+    if extra.get("index_url"):
+        lines.append(f"[bold]Index:[/] {extra['index_url']}")
+    if extra.get("endpoint"):
+        lines.append(f"[bold]Endpoint:[/] {extra['endpoint']}")
+    if extra.get("install_command"):
+        lines.append(f"[bold]Install Command:[/] {extra['install_command']}")
+    if extra.get("installs") is not None:
+        lines.append(f"[bold]Installs:[/] {extra['installs']}")
+    if extra.get("weekly_installs"):
+        lines.append(f"[bold]Weekly Installs:[/] {extra['weekly_installs']}")
+
+    security = extra.get("security_audits")
+    if isinstance(security, dict) and security:
+        ordered = ", ".join(f"{name}={status}" for name, status in sorted(security.items()))
+        lines.append(f"[bold]Security:[/] {ordered}")
+
+    return lines
+
+
+def _resolve_source_meta_and_bundle(identifier: str, sources):
+    """Resolve metadata and bundle for a specific identifier."""
+    meta = None
+    bundle = None
+    matched_source = None
+
+    for src in sources:
+        if meta is None:
+            try:
+                meta = src.inspect(identifier)
+                if meta:
+                    matched_source = src
+            except Exception:
+                meta = None
+        try:
+            bundle = src.fetch(identifier)
+        except Exception:
+            bundle = None
+        if bundle:
+            matched_source = src
+            if meta is None:
+                try:
+                    meta = src.inspect(identifier)
+                except Exception:
+                    meta = None
+            break
+
+    return meta, bundle, matched_source
+
+
+def _derive_category_from_install_path(install_path: str) -> str:
+    path = Path(install_path)
+    parent = str(path.parent)
+    return "" if parent == "." else parent
+
+
+# ---------------------------------------------------------------------------
+# Interactive name/category resolution for URL-installed skills
+# ---------------------------------------------------------------------------
+
+_VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+_VALID_CATEGORY_RE = re.compile(r"^[a-z][a-z0-9_/-]*$")
+
+
+def _is_valid_installed_skill_name(name: str) -> bool:
+    """Accept identifier-shaped names, reject empty / sentinel-y values."""
+    if not isinstance(name, str):
+        return False
+    candidate = name.strip().lower()
+    if not candidate or candidate in {"skill", "readme", "index", "unnamed-skill"}:
+        return False
+    return bool(_VALID_NAME_RE.match(candidate))
+
+
+def _existing_categories() -> List[str]:
+    """Return sorted subdirectory names under ``~/.hermes/skills/`` that look
+    like category buckets (contain at least one ``SKILL.md`` somewhere below).
+
+    Used to suggest reusable categories when interactively installing from a
+    URL. Hidden dirs (``.hub``, ``.trash``) are skipped.
+    """
+    from tools.skills_hub import SKILLS_DIR
+    out: List[str] = []
+    try:
+        for entry in SKILLS_DIR.iterdir():
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            # Only count as a category if it contains skills, not if it IS a skill.
+            # Heuristic: if ``<entry>/SKILL.md`` exists, it's a skill at the
+            # top level (no category); otherwise treat as a category bucket.
+            if (entry / "SKILL.md").exists():
+                continue
+            # Has at least one nested SKILL.md?
+            try:
+                if any(entry.rglob("SKILL.md")):
+                    out.append(entry.name)
+            except OSError:
+                continue
+    except (FileNotFoundError, OSError):
+        return []
+    return sorted(set(out))
+
+
+def _prompt_for_skill_name(c: Console, url: str, default: str = "") -> Optional[str]:
+    """Prompt interactively for a skill name. Returns None on cancel/EOF."""
+    c.print()
+    c.print(
+        f"[yellow]The SKILL.md at {url} doesn't declare a `name:` in its "
+        f"frontmatter,[/]\n[yellow]and the URL path doesn't produce a valid "
+        f"identifier either.[/]"
+    )
+    default_hint = f" [{default}]" if default else ""
+    c.print(
+        f"[bold]Enter a skill name{default_hint}:[/] "
+        f"[dim](lowercase letters, digits, hyphens, underscores; starts with a letter)[/]"
+    )
+    try:
+        answer = input("Name: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not answer and default:
+        answer = default
+    if not _is_valid_installed_skill_name(answer):
+        c.print(f"[bold red]Invalid name:[/] {answer!r}. Aborting install.\n")
+        return None
+    return answer
+
+
+def _prompt_for_category(c: Console, existing: List[str]) -> str:
+    """Prompt interactively for a category. Empty/None input means flat install."""
+    c.print()
+    if existing:
+        c.print(
+            "[bold]Pick a category[/] "
+            "[dim](reuse an existing bucket, type a new one, or press Enter to install flat)[/]"
+        )
+        c.print(f"[dim]Existing: {', '.join(existing)}[/]")
+    else:
+        c.print(
+            "[bold]Category[/] [dim](optional — press Enter to install flat at ~/.hermes/skills/<name>/)[/]"
+        )
+    try:
+        answer = input("Category: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    if not answer:
+        return ""
+    if not _VALID_CATEGORY_RE.match(answer):
+        c.print(f"[dim]Invalid category {answer!r} — installing flat.[/]")
+        return ""
+    return answer
+
+
 def do_search(query: str, source: str = "all", limit: int = 10,
               console: Optional[Console] = None) -> None:
     """Search registries and display results as a Rich table."""
@@ -86,7 +249,8 @@ def do_search(query: str, source: str = "all", limit: int = 10,
 
     auth = GitHubAuth()
     sources = create_source_router(auth)
-    results = unified_search(query, sources, source_filter=source, limit=limit)
+    with c.status("[bold]Searching registries..."):
+        results = unified_search(query, sources, source_filter=source, limit=limit)
 
     if not results:
         c.print("[dim]No skills found matching your query.[/]\n")
@@ -122,7 +286,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     Official skills are always shown first, regardless of source filter.
     """
     from tools.skills_hub import (
-        GitHubAuth, create_source_router, OptionalSkillSource, SkillMeta,
+        GitHubAuth, create_source_router, parallel_search_sources,
     )
 
     # Clamp page_size to safe range
@@ -133,38 +297,36 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     auth = GitHubAuth()
     sources = create_source_router(auth)
 
-    # Collect results from all (or filtered) sources
-    # Use empty query to get everything; per-source limits prevent overload
+    # Collect results from all (or filtered) sources in parallel.
+    # Per-source limits are generous — parallelism + 30s timeout cap prevents hangs.
     _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
-    _PER_SOURCE_LIMIT = {"official": 100, "github": 100, "clawhub": 50,
-                         "claude-marketplace": 50, "lobehub": 50}
+    _PER_SOURCE_LIMIT = {
+        "official": 200, "skills-sh": 200, "well-known": 50,
+        "github": 200, "clawhub": 500, "claude-marketplace": 100,
+        "lobehub": 500, "browse-sh": 500,
+    }
 
-    all_results: list = []
-    source_counts: dict = {}
-
-    for src in sources:
-        sid = src.source_id()
-        if source != "all" and sid != source and sid != "official":
-            # Always include official source for the "first" placement
-            continue
-        try:
-            limit = _PER_SOURCE_LIMIT.get(sid, 50)
-            results = src.search("", limit=limit)
-            source_counts[sid] = len(results)
-            all_results.extend(results)
-        except Exception:
-            continue
+    with c.status("[bold]Fetching skills from registries..."):
+        all_results, source_counts, timed_out = parallel_search_sources(
+            sources,
+            query="",
+            per_source_limits=_PER_SOURCE_LIMIT,
+            source_filter=source,
+            overall_timeout=30,
+        )
 
     if not all_results:
         c.print("[dim]No skills found in the Skills Hub.[/]\n")
         return
 
-    # Deduplicate by name, preferring higher trust
+    # Deduplicate by identifier, preferring higher trust.
+    # identifier is always unique per skill; name is not (browse-sh skills from different
+    # sites can share the same task name, e.g. "search-listings" on Airbnb and Booking.com).
     seen: dict = {}
     for r in all_results:
         rank = _TRUST_RANK.get(r.trust_level, 0)
-        if r.name not in seen or rank > _TRUST_RANK.get(seen[r.name].trust_level, 0):
-            seen[r.name] = r
+        if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+            seen[r.identifier] = r
     deduped = list(seen.values())
 
     # Sort: official first, then by trust level (desc), then alphabetically
@@ -187,8 +349,11 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
 
     # Build header
     source_label = f"— {source}" if source != "all" else "— all sources"
+    loaded_label = f"{total} skills loaded"
+    if timed_out:
+        loaded_label += f", {len(timed_out)} source(s) still loading"
     c.print(f"\n[bold]Skills Hub — Browse {source_label}[/]"
-            f"  [dim]({total} skills, page {page}/{total_pages})[/]")
+            f"  [dim]({loaded_label}, page {page}/{total_pages})[/]")
     if official_count > 0 and page == 1:
         c.print(f"[bright_cyan]★ {official_count} official optional skill(s) from Nous Research[/]")
     c.print()
@@ -235,13 +400,26 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
         parts = [f"{sid}: {ct}" for sid, ct in sorted(source_counts.items())]
         c.print(f"  [dim]Sources: {', '.join(parts)}[/]")
 
-    c.print("[dim]Use: hermes skills inspect <identifier> to preview, "
-            "hermes skills install <identifier> to install[/]\n")
+    if timed_out:
+        c.print(f"  [yellow]⚡ Slow sources skipped: {', '.join(timed_out)} "
+                f"— run again for cached results[/]")
+
+    c.print("[dim]Tip: 'hermes skills search <query>' searches deeper across all registries[/]\n")
 
 
 def do_install(identifier: str, category: str = "", force: bool = False,
-               console: Optional[Console] = None) -> None:
-    """Fetch, quarantine, scan, confirm, and install a skill."""
+               console: Optional[Console] = None, skip_confirm: bool = False,
+               invalidate_cache: bool = True,
+               name_override: str = "") -> None:
+    """Fetch, quarantine, scan, confirm, and install a skill.
+
+    ``name_override`` lets non-interactive callers (slash commands, gateway,
+    scripts) supply a skill name when the upstream SKILL.md lacks a valid
+    ``name:`` frontmatter field. On interactive TTY surfaces, a missing name
+    triggers a prompt instead; ``skip_confirm=True`` means "non-interactive"
+    (so pair it with ``name_override`` when installing from a URL that has
+    no frontmatter).
+    """
     from tools.skills_hub import (
         GitHubAuth, create_source_router, ensure_hub_dirs,
         quarantine_bundle, install_from_quarantine, HubLockFile,
@@ -263,15 +441,79 @@ def do_install(identifier: str, category: str = "", force: bool = False,
 
     c.print(f"\n[bold]Fetching:[/] {identifier}")
 
-    bundle = None
-    for src in sources:
-        bundle = src.fetch(identifier)
-        if bundle:
-            break
+    meta, bundle, _matched_source = _resolve_source_meta_and_bundle(identifier, sources)
 
     if not bundle:
-        c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.\n")
+        # Check if any source hit GitHub API rate limit
+        rate_limited = any(
+            getattr(src, "is_rate_limited", False)
+            or getattr(getattr(src, "github", None), "is_rate_limited", False)
+            for src in sources
+        )
+        c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.")
+        if rate_limited:
+            c.print(
+                "[yellow]Hint:[/] GitHub API rate limit exhausted "
+                "(unauthenticated: 60 requests/hour).\n"
+                "Set [bold]GITHUB_TOKEN[/] in your .env or install the "
+                "[bold]gh[/] CLI and run [bold]gh auth login[/] "
+                "to raise the limit to 5,000/hr.\n"
+            )
+        else:
+            c.print()
         return
+
+    # URL-sourced skills may arrive with an empty name when SKILL.md has no
+    # ``name:`` in frontmatter AND the URL path doesn't yield a valid
+    # identifier. Resolve by (1) --name override, (2) interactive prompt on
+    # a TTY, (3) refuse with an actionable error on non-interactive surfaces.
+    bundle_meta = getattr(bundle, "metadata", {}) or {}
+    if bundle.source == "url" and (not bundle.name or bundle_meta.get("awaiting_name")):
+        if name_override and _is_valid_installed_skill_name(name_override):
+            bundle.name = name_override.strip()
+            bundle_meta["awaiting_name"] = False
+        elif name_override:
+            c.print(
+                f"[bold red]Invalid --name:[/] {name_override!r}. "
+                "Must be a lowercase identifier (letters, digits, hyphens, "
+                "underscores; starts with a letter).\n"
+            )
+            return
+        elif skip_confirm:
+            # Non-interactive surface (slash command / TUI / gateway). Can't
+            # prompt — emit an actionable error.
+            url = bundle_meta.get("url") or identifier
+            c.print(
+                f"[bold red]Cannot install from URL:[/] {url}\n"
+                "[yellow]The SKILL.md has no `name:` in its frontmatter, "
+                "and the URL path doesn't produce a valid identifier.[/]\n\n"
+                "Retry with an explicit name:\n"
+                f"  [bold]/skills install {url} --name <your-name>[/]\n"
+                f"  [bold]hermes skills install {url} --name <your-name>[/]\n\n"
+                "[dim]Or ask the SKILL.md's author to add a `name:` field to "
+                "its YAML frontmatter.[/]\n"
+            )
+            return
+        else:
+            # Interactive TTY — prompt.
+            url = bundle_meta.get("url") or identifier
+            chosen = _prompt_for_skill_name(c, url)
+            if not chosen:
+                c.print("[dim]Installation cancelled.[/]\n")
+                return
+            bundle.name = chosen
+            bundle_meta["awaiting_name"] = False
+        # Keep SkillMeta in sync so downstream "already installed" checks,
+        # audit logs, and display all see the final name.
+        if meta is not None:
+            meta.name = bundle.name
+            meta.path = bundle.name
+
+    # URL-sourced skills: offer to pick a category interactively when the
+    # caller didn't specify one (TTY only — non-interactive installs fall
+    # through to flat install, matching all other sources).
+    if bundle.source == "url" and not category and not skip_confirm:
+        category = _prompt_for_category(c, _existing_categories())
 
     # Auto-detect category for official skills (e.g. "official/autonomous-ai-agents/blackbox")
     if bundle.source == "official" and not category:
@@ -288,13 +530,24 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             c.print("Use --force to reinstall.\n")
             return
 
+    extra_metadata = dict(getattr(meta, "extra", {}) or {})
+    extra_metadata.update(getattr(bundle, "metadata", {}) or {})
+
     # Quarantine the bundle
-    q_path = quarantine_bundle(bundle)
+    try:
+        q_path = quarantine_bundle(bundle)
+    except ValueError as exc:
+        c.print(f"[bold red]Installation blocked:[/] {exc}\n")
+        from tools.skills_hub import append_audit_log
+        append_audit_log("BLOCKED", bundle.name, bundle.source,
+                         bundle.trust_level, "invalid_path", str(exc))
+        return
     c.print(f"[dim]Quarantined to {q_path.relative_to(q_path.parent.parent.parent)}[/]")
 
     # Scan
     c.print("[bold]Running security scan...[/]")
-    result = scan_skill(q_path, source=identifier)
+    scan_source = getattr(bundle, "identifier", "") or getattr(meta, "identifier", "") or identifier
+    result = scan_skill(q_path, source=scan_source)
     c.print(format_scan_report(result))
 
     # Check install policy
@@ -309,15 +562,21 @@ def do_install(identifier: str, category: str = "", force: bool = False,
                          f"{len(result.findings)}_findings")
         return
 
+    if extra_metadata:
+        metadata_lines = _format_extra_metadata_lines(extra_metadata)
+        if metadata_lines:
+            c.print(Panel("\n".join(metadata_lines), title="Upstream Metadata", border_style="blue"))
+
     # Confirm with user — show appropriate warning based on source
-    if not force:
+    # skip_confirm bypasses the prompt (needed in TUI mode where input() hangs)
+    if not force and not skip_confirm:
         c.print()
         if bundle.source == "official":
             c.print(Panel(
                 "[bold bright_cyan]This is an official optional skill maintained by Nous Research.[/]\n\n"
                 "It ships with hermes-agent but is not activated by default.\n"
                 "Installing will copy it to your skills directory where the agent can use it.\n\n"
-                f"Files will be at: [cyan]~/.hermes/skills/{category + '/' if category else ''}{bundle.name}/[/]",
+                f"Files will be at: [cyan]{display_hermes_home()}/skills/{category + '/' if category else ''}{bundle.name}/[/]",
                 title="Official Skill",
                 border_style="bright_cyan",
             ))
@@ -327,7 +586,7 @@ def do_install(identifier: str, category: str = "", force: bool = False,
                 "External skills can contain instructions that influence agent behavior,\n"
                 "shell commands, and scripts. Even after automated scanning, you should\n"
                 "review the installed files before use.\n\n"
-                f"Files will be at: [cyan]~/.hermes/skills/{category + '/' if category else ''}{bundle.name}/[/]",
+                f"Files will be at: [cyan]{display_hermes_home()}/skills/{category + '/' if category else ''}{bundle.name}/[/]",
                 title="Disclaimer",
                 border_style="yellow",
             ))
@@ -336,16 +595,35 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             answer = input("Confirm [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
-        if answer not in ("y", "yes"):
+        if answer not in {"y", "yes"}:
             c.print("[dim]Installation cancelled.[/]\n")
             shutil.rmtree(q_path, ignore_errors=True)
             return
 
     # Install
-    install_dir = install_from_quarantine(q_path, bundle.name, category, bundle, result)
+    try:
+        install_dir = install_from_quarantine(q_path, bundle.name, category, bundle, result)
+    except ValueError as exc:
+        c.print(f"[bold red]Installation blocked:[/] {exc}\n")
+        shutil.rmtree(q_path, ignore_errors=True)
+        from tools.skills_hub import append_audit_log
+        append_audit_log("BLOCKED", bundle.name, bundle.source,
+                         bundle.trust_level, "invalid_path", str(exc))
+        return
     from tools.skills_hub import SKILLS_DIR
     c.print(f"[bold green]Installed:[/] {install_dir.relative_to(SKILLS_DIR)}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
+
+    if invalidate_cache:
+        # Invalidate the skills prompt cache so the new skill appears immediately
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    else:
+        c.print("[dim]Skill will be available in your next session.[/]")
+        c.print("[dim]Use /reset to start a new session now, or --now to activate immediately (invalidates prompt cache).[/]\n")
 
 
 def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
@@ -361,22 +639,11 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
         if not identifier:
             return
 
-    meta = None
-    for src in sources:
-        meta = src.inspect(identifier)
-        if meta:
-            break
+    meta, bundle, _matched_source = _resolve_source_meta_and_bundle(identifier, sources)
 
     if not meta:
         c.print(f"[bold red]Error:[/] Could not find '{identifier}' in any source.\n")
         return
-
-    # Also fetch full content for preview
-    bundle = None
-    for src in sources:
-        bundle = src.fetch(identifier)
-        if bundle:
-            break
 
     c.print()
     trust_style = {"builtin": "bright_cyan", "trusted": "green", "community": "yellow"}.get(meta.trust_level, "dim")
@@ -391,11 +658,14 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
     ]
     if meta.tags:
         info_lines.append(f"[bold]Tags:[/] {', '.join(meta.tags)}")
+    info_lines.extend(_format_extra_metadata_lines(meta.extra))
 
     c.print(Panel("\n".join(info_lines), title=f"Skill: {meta.name}"))
 
     if bundle and "SKILL.md" in bundle.files:
         content = bundle.files["SKILL.md"]
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
         # Show first 50 lines as preview
         lines = content.split("\n")
         preview = "\n".join(lines[:50])
@@ -406,11 +676,108 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
     c.print()
 
 
-def do_list(source_filter: str = "all", console: Optional[Console] = None) -> None:
-    """List installed skills, distinguishing hub, builtin, and local skills."""
+def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> dict:
+    """Paginated hub browse for programmatic callers (e.g. TUI gateway).
+
+    Returns ``{"items": [...], "page": int, "total_pages": int, "total": int}``.
+    """
+    from tools.skills_hub import GitHubAuth, create_source_router
+
+    page_size = max(1, min(page_size, 100))
+    _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
+    _PER_SOURCE_LIMIT = {"official": 100, "skills-sh": 100, "well-known": 25, "github": 100, "clawhub": 50,
+                         "claude-marketplace": 50, "lobehub": 50, "browse-sh": 500}
+    auth = GitHubAuth()
+    sources = create_source_router(auth)
+    all_results: list = []
+    for src in sources:
+        sid = src.source_id()
+        if source != "all" and sid != source and sid != "official":
+            continue
+        try:
+            limit = _PER_SOURCE_LIMIT.get(sid, 50)
+            all_results.extend(src.search("", limit=limit))
+        except Exception:
+            continue
+    if not all_results:
+        return {"items": [], "page": 1, "total_pages": 1, "total": 0}
+    seen: dict = {}
+    for r in all_results:
+        rank = _TRUST_RANK.get(r.trust_level, 0)
+        if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+            seen[r.identifier] = r
+    deduped = list(seen.values())
+    deduped.sort(key=lambda r: (-_TRUST_RANK.get(r.trust_level, 0), r.source != "official", r.name.lower()))
+    total = len(deduped)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    page_items = deduped[start : min(start + page_size, total)]
+    return {
+        "items": [{"name": r.name, "description": r.description, "source": r.source,
+                    "trust": r.trust_level} for r in page_items],
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    }
+
+
+def inspect_skill(identifier: str) -> Optional[dict]:
+    """Skill metadata (+ SKILL.md preview) for programmatic callers."""
+    from tools.skills_hub import GitHubAuth, create_source_router
+
+    class _Q:
+        def print(self, *a, **k):
+            pass
+
+    c = _Q()
+    auth = GitHubAuth()
+    sources = create_source_router(auth)
+    ident = identifier
+    if "/" not in ident:
+        ident = _resolve_short_name(ident, sources, c)
+        if not ident:
+            return None
+    meta, bundle, _ = _resolve_source_meta_and_bundle(ident, sources)
+    if not meta:
+        return None
+    out: dict = {
+        "name": meta.name,
+        "description": meta.description,
+        "source": meta.source,
+        "identifier": meta.identifier,
+        "tags": list(meta.tags) if meta.tags else [],
+    }
+    if bundle and "SKILL.md" in bundle.files:
+        content = bundle.files["SKILL.md"]
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        lines = content.split("\n")
+        preview = "\n".join(lines[:50])
+        if len(lines) > 50:
+            preview += f"\n\n... ({len(lines) - 50} more lines)"
+        out["skill_md_preview"] = preview
+    return out
+
+
+def do_list(source_filter: str = "all",
+            enabled_only: bool = False,
+            console: Optional[Console] = None) -> None:
+    """List installed skills, distinguishing hub, builtin, and local skills.
+
+    Args:
+        source_filter: ``all`` | ``hub`` | ``builtin`` | ``local``.
+        enabled_only: If True, hide disabled skills from the output.
+
+    Enabled/disabled state is resolved against the currently active profile's
+    config — ``hermes -p <profile> skills list`` reads that profile's
+    ``skills.disabled`` list because ``-p`` swaps ``HERMES_HOME`` at process
+    start.  No explicit profile flag needed here.
+    """
     from tools.skills_hub import HubLockFile, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _find_all_skills
+    from agent.skill_utils import get_disabled_skill_names
 
     c = console or _console
     ensure_hub_dirs()
@@ -418,17 +785,26 @@ def do_list(source_filter: str = "all", console: Optional[Console] = None) -> No
     hub_installed = {e["name"]: e for e in lock.list_installed()}
     builtin_names = set(_read_manifest())
 
-    all_skills = _find_all_skills()
+    # Pull ALL skills (including disabled ones) so we can annotate status.
+    all_skills = _find_all_skills(skip_disabled=True)
+    disabled_names = get_disabled_skill_names()
 
-    table = Table(title="Installed Skills")
+    title = "Installed Skills"
+    if enabled_only:
+        title += " (enabled only)"
+
+    table = Table(title=title)
     table.add_column("Name", style="bold cyan")
     table.add_column("Category", style="dim")
     table.add_column("Source", style="dim")
     table.add_column("Trust", style="dim")
+    table.add_column("Status", style="dim")
 
     hub_count = 0
     builtin_count = 0
     local_count = 0
+    enabled_count = 0
+    disabled_count = 0
 
     for skill in sorted(all_skills, key=lambda s: (s.get("category") or "", s["name"])):
         name = skill["name"]
@@ -439,29 +815,91 @@ def do_list(source_filter: str = "all", console: Optional[Console] = None) -> No
             source_type = "hub"
             source_display = hub_entry.get("source", "hub")
             trust = hub_entry.get("trust_level", "community")
-            hub_count += 1
         elif name in builtin_names:
             source_type = "builtin"
             source_display = "builtin"
             trust = "builtin"
-            builtin_count += 1
         else:
             source_type = "local"
             source_display = "local"
             trust = "local"
-            local_count += 1
 
         if source_filter != "all" and source_filter != source_type:
             continue
 
+        is_enabled = name not in disabled_names
+        if enabled_only and not is_enabled:
+            continue
+
+        if source_type == "hub":
+            hub_count += 1
+        elif source_type == "builtin":
+            builtin_count += 1
+        else:
+            local_count += 1
+
+        if is_enabled:
+            enabled_count += 1
+            status_cell = "[bold green]enabled[/]"
+        else:
+            disabled_count += 1
+            status_cell = "[dim red]disabled[/]"
+
         trust_style = {"builtin": "bright_cyan", "trusted": "green", "community": "yellow", "local": "dim"}.get(trust, "dim")
         trust_label = "official" if source_display == "official" else trust
-        table.add_row(name, category, source_display, f"[{trust_style}]{trust_label}[/]")
+        table.add_row(name, category, source_display, f"[{trust_style}]{trust_label}[/]", status_cell)
 
     c.print(table)
-    c.print(
-        f"[dim]{hub_count} hub-installed, {builtin_count} builtin, {local_count} local[/]\n"
-    )
+    summary = f"[dim]{hub_count} hub-installed, {builtin_count} builtin, {local_count} local"
+    if enabled_only:
+        summary += f" — {enabled_count} enabled shown"
+    else:
+        summary += f" — {enabled_count} enabled, {disabled_count} disabled"
+    summary += "[/]\n"
+    c.print(summary)
+
+
+def do_check(name: Optional[str] = None, console: Optional[Console] = None) -> None:
+    """Check hub-installed skills for upstream updates."""
+    from tools.skills_hub import check_for_skill_updates
+
+    c = console or _console
+    results = check_for_skill_updates(name=name)
+    if not results:
+        c.print("[dim]No hub-installed skills to check.[/]\n")
+        return
+
+    table = Table(title="Skill Updates")
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Source", style="dim")
+    table.add_column("Status", style="dim")
+
+    for entry in results:
+        table.add_row(entry.get("name", ""), entry.get("source", ""), entry.get("status", ""))
+
+    c.print(table)
+    update_count = sum(1 for entry in results if entry.get("status") == "update_available")
+    c.print(f"[dim]{update_count} update(s) available across {len(results)} checked skill(s)[/]\n")
+
+
+def do_update(name: Optional[str] = None, console: Optional[Console] = None) -> None:
+    """Update hub-installed skills with upstream changes."""
+    from tools.skills_hub import HubLockFile, check_for_skill_updates
+
+    c = console or _console
+    lock = HubLockFile()
+    updates = [entry for entry in check_for_skill_updates(name=name) if entry.get("status") == "update_available"]
+    if not updates:
+        c.print("[dim]No updates available.[/]\n")
+        return
+
+    for entry in updates:
+        installed = lock.get_installed(entry["name"])
+        category = _derive_category_from_install_path(installed.get("install_path", "")) if installed else ""
+        c.print(f"[bold]Updating:[/] {entry['name']}")
+        do_install(entry["identifier"], category=category, force=True, console=c)
+
+    c.print(f"[bold green]Updated {len(updates)} skill(s).[/]\n")
 
 
 def do_audit(name: Optional[str] = None, console: Optional[Console] = None) -> None:
@@ -497,26 +935,84 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None) -> N
         c.print()
 
 
-def do_uninstall(name: str, console: Optional[Console] = None) -> None:
+def do_uninstall(name: str, console: Optional[Console] = None,
+                 skip_confirm: bool = False,
+                 invalidate_cache: bool = True) -> None:
     """Remove a hub-installed skill with confirmation."""
     from tools.skills_hub import uninstall_skill
 
     c = console or _console
 
-    c.print(f"\n[bold]Uninstall '{name}'?[/]")
-    try:
-        answer = input("Confirm [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = "n"
-    if answer not in ("y", "yes"):
-        c.print("[dim]Cancelled.[/]\n")
-        return
+    # skip_confirm bypasses the prompt (needed in TUI mode where input() hangs)
+    if not skip_confirm:
+        c.print(f"\n[bold]Uninstall '{name}'?[/]")
+        try:
+            answer = input("Confirm [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            c.print("[dim]Cancelled.[/]\n")
+            return
 
     success, msg = uninstall_skill(name)
     if success:
         c.print(f"[bold green]{msg}[/]\n")
+        if invalidate_cache:
+            try:
+                from agent.prompt_builder import clear_skills_system_prompt_cache
+                clear_skills_system_prompt_cache(clear_snapshot=True)
+            except Exception:
+                pass
+        else:
+            c.print("[dim]Change will take effect in your next session.[/]")
+            c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
     else:
         c.print(f"[bold red]Error:[/] {msg}\n")
+
+
+def do_reset(name: str, restore: bool = False,
+             console: Optional[Console] = None,
+             skip_confirm: bool = False,
+             invalidate_cache: bool = True) -> None:
+    """Reset a bundled skill's manifest tracking (+ optionally restore from bundled)."""
+    from tools.skills_sync import reset_bundled_skill
+
+    c = console or _console
+
+    if not skip_confirm and restore:
+        c.print(f"\n[bold]Restore '{name}' from bundled source?[/]")
+        c.print("[dim]This will DELETE your current copy and re-copy the bundled version.[/]")
+        try:
+            answer = input("Confirm [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            c.print("[dim]Cancelled.[/]\n")
+            return
+
+    result = reset_bundled_skill(name, restore=restore)
+
+    if not result["ok"]:
+        c.print(f"[bold red]Error:[/] {result['message']}\n")
+        return
+
+    c.print(f"[bold green]{result['message']}[/]")
+    synced = result.get("synced") or {}
+    if synced.get("copied"):
+        c.print(f"[dim]Copied: {', '.join(synced['copied'])}[/]")
+    if synced.get("updated"):
+        c.print(f"[dim]Updated: {', '.join(synced['updated'])}[/]")
+    c.print()
+
+    if invalidate_cache:
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    else:
+        c.print("[dim]Change will take effect in your next session.[/]")
+        c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
 
 
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
@@ -535,7 +1031,8 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
         table.add_column("Repo", style="bold cyan")
         table.add_column("Path", style="dim")
         for t in taps:
-            table.add_row(t["repo"], t.get("path", "skills/"))
+            label = t.get("repo") or t.get("name") or t.get("path", "unknown")
+            table.add_row(label, t.get("path", "skills/"))
         c.print(table)
         c.print()
 
@@ -613,7 +1110,7 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
         auth = GitHubAuth()
         if not auth.is_authenticated():
             c.print("[bold red]Error:[/] GitHub authentication required.\n"
-                    "Set GITHUB_TOKEN in ~/.hermes/.env or run 'gh auth login'.\n")
+                    f"Set GITHUB_TOKEN in {display_hermes_home()}/.env or run 'gh auth login'.\n")
             return
 
         c.print(f"[bold]Publishing '{name}' to {repo}...[/]")
@@ -643,7 +1140,7 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
             f"https://api.github.com/repos/{target_repo}/forks",
             headers=headers, timeout=30,
         )
-        if resp.status_code in (200, 202):
+        if resp.status_code in {200, 202}:
             fork = resp.json()
             fork_repo = fork["full_name"]
         elif resp.status_code == 403:
@@ -756,10 +1253,15 @@ def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> N
         "taps": tap_list,
     }
 
-    out = Path(output_path)
-    out.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n")
-    c.print(f"[bold green]Snapshot exported:[/] {out}")
-    c.print(f"[dim]{len(installed)} skill(s), {len(tap_list)} tap(s)[/]\n")
+    payload = json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n"
+    if output_path == "-":
+        import sys
+        sys.stdout.write(payload)
+    else:
+        out = Path(output_path)
+        out.write_text(payload, encoding="utf-8")
+        c.print(f"[bold green]Snapshot exported:[/] {out}")
+        c.print(f"[dim]{len(installed)} skill(s), {len(tap_list)} tap(s)[/]\n")
 
 
 def do_snapshot_import(input_path: str, force: bool = False,
@@ -774,7 +1276,7 @@ def do_snapshot_import(input_path: str, force: bool = False,
         return
 
     try:
-        snapshot = json.loads(inp.read_text())
+        snapshot = json.loads(inp.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         c.print(f"[bold red]Error:[/] Invalid JSON in {inp}\n")
         return
@@ -822,15 +1324,27 @@ def skills_command(args) -> None:
     elif action == "search":
         do_search(args.query, source=args.source, limit=args.limit)
     elif action == "install":
-        do_install(args.identifier, category=args.category, force=args.force)
+        do_install(args.identifier, category=args.category, force=args.force,
+                   skip_confirm=getattr(args, "yes", False),
+                   name_override=getattr(args, "name", "") or "")
     elif action == "inspect":
         do_inspect(args.identifier)
     elif action == "list":
-        do_list(source_filter=args.source)
+        do_list(
+            source_filter=args.source,
+            enabled_only=getattr(args, "enabled_only", False),
+        )
+    elif action == "check":
+        do_check(name=getattr(args, "name", None))
+    elif action == "update":
+        do_update(name=getattr(args, "name", None))
     elif action == "audit":
         do_audit(name=getattr(args, "name", None))
     elif action == "uninstall":
         do_uninstall(args.name)
+    elif action == "reset":
+        do_reset(args.name, restore=getattr(args, "restore", False),
+                 skip_confirm=getattr(args, "yes", False))
     elif action == "publish":
         do_publish(
             args.skill_path,
@@ -853,7 +1367,7 @@ def skills_command(args) -> None:
             return
         do_tap(tap_action, repo=repo)
     else:
-        _console.print("Usage: hermes skills [browse|search|install|inspect|list|audit|uninstall|publish|snapshot|tap]\n")
+        _console.print("Usage: hermes skills [browse|search|install|inspect|list|check|update|audit|uninstall|reset|publish|snapshot|tap]\n")
         _console.print("Run 'hermes skills <command> --help' for details.\n")
 
 
@@ -869,9 +1383,12 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         /skills search kubernetes
         /skills install openai/skills/skill-creator
         /skills install openai/skills/skill-creator --force
+        /skills install https://example.com/path/SKILL.md
         /skills inspect openai/skills/skill-creator
         /skills list
         /skills list --source hub
+        /skills check
+        /skills update
         /skills audit
         /skills audit my-skill
         /skills uninstall my-skill
@@ -920,7 +1437,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "search":
         if not args:
-            c.print("[bold red]Usage:[/] /skills search <query> [--source github] [--limit N]\n")
+            c.print("[bold red]Usage:[/] /skills search <query> [--source skills-sh|well-known|github|official] [--limit N]\n")
             return
         source = "all"
         limit = 10
@@ -943,15 +1460,26 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "install":
         if not args:
-            c.print("[bold red]Usage:[/] /skills install <identifier> [--category <cat>] [--force]\n")
+            c.print("[bold red]Usage:[/] /skills install <identifier-or-url> [--name <name>] [--category <cat>] [--force] [--now]\n")
             return
         identifier = args[0]
         category = ""
+        name_override = ""
+        # Slash commands run inside prompt_toolkit where input() hangs.
+        # Always skip confirmation — the user typing the command is implicit consent.
+        skip_confirm = True
         force = "--force" in args
+        # --now invalidates prompt cache immediately (costs more money).
+        # Default: defer to next session to preserve cache.
+        invalidate_cache = "--now" in args
         for i, a in enumerate(args):
             if a == "--category" and i + 1 < len(args):
                 category = args[i + 1]
-        do_install(identifier, category=category, force=force, console=c)
+            elif a == "--name" and i + 1 < len(args):
+                name_override = args[i + 1]
+        do_install(identifier, category=category, force=force,
+                   skip_confirm=skip_confirm, invalidate_cache=invalidate_cache,
+                   name_override=name_override, console=c)
 
     elif action == "inspect":
         if not args:
@@ -961,11 +1489,20 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "list":
         source_filter = "all"
+        enabled_only = "--enabled-only" in args or "--enabled" in args
         if "--source" in args:
             idx = args.index("--source")
             if idx + 1 < len(args):
                 source_filter = args[idx + 1]
-        do_list(source_filter=source_filter, console=c)
+        do_list(source_filter=source_filter, enabled_only=enabled_only, console=c)
+
+    elif action == "check":
+        name = args[0] if args else None
+        do_check(name=name, console=c)
+
+    elif action == "update":
+        name = args[0] if args else None
+        do_update(name=name, console=c)
 
     elif action == "audit":
         name = args[0] if args else None
@@ -973,9 +1510,26 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "uninstall":
         if not args:
-            c.print("[bold red]Usage:[/] /skills uninstall <name>\n")
+            c.print("[bold red]Usage:[/] /skills uninstall <name> [--now]\n")
             return
-        do_uninstall(args[0], console=c)
+        # Slash commands run inside prompt_toolkit where input() hangs.
+        skip_confirm = True
+        invalidate_cache = "--now" in args
+        do_uninstall(args[0], console=c, skip_confirm=skip_confirm,
+                     invalidate_cache=invalidate_cache)
+
+    elif action == "reset":
+        if not args:
+            c.print("[bold red]Usage:[/] /skills reset <name> [--restore] [--now]\n")
+            c.print("[dim]Clears the bundled-skills manifest entry so future updates stop marking it as user-modified.[/]")
+            c.print("[dim]Pass --restore to also replace the current copy with the bundled version.[/]\n")
+            return
+        name = args[0]
+        restore = "--restore" in args
+        invalidate_cache = "--now" in args
+        # Slash commands can't prompt — --restore in slash mode is implicit consent.
+        do_reset(name, restore=restore, console=c, skip_confirm=True,
+                 invalidate_cache=invalidate_cache)
 
     elif action == "publish":
         if not args:
@@ -1012,7 +1566,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         repo = args[1] if len(args) > 1 else ""
         do_tap(tap_action, repo=repo, console=c)
 
-    elif action in ("help", "--help", "-h"):
+    elif action in {"help", "--help", "-h"}:
         _print_skills_help(c)
 
     else:
@@ -1028,9 +1582,13 @@ def _print_skills_help(console: Console) -> None:
         "  [cyan]search[/] <query>              Search registries for skills\n"
         "  [cyan]install[/] <identifier>        Install a skill (with security scan)\n"
         "  [cyan]inspect[/] <identifier>        Preview a skill without installing\n"
-        "  [cyan]list[/] [--source hub|builtin|local] List installed skills\n"
+        "  [cyan]list[/] [--source hub|builtin|local] [--enabled-only]\n"
+        "       List installed skills; --enabled-only filters to the active profile's live set\n"
+        "  [cyan]check[/] [name]                Check hub skills for upstream updates\n"
+        "  [cyan]update[/] [name]               Update hub skills with upstream changes\n"
         "  [cyan]audit[/] [name]                Re-scan hub skills for security\n"
         "  [cyan]uninstall[/] <name>            Remove a hub-installed skill\n"
+        "  [cyan]reset[/] <name> [--restore]    Reset bundled-skill tracking (fix 'user-modified' flag)\n"
         "  [cyan]publish[/] <path> --repo <r>   Publish a skill to GitHub via PR\n"
         "  [cyan]snapshot[/] export|import      Export/import skill configurations\n"
         "  [cyan]tap[/] list|add|remove         Manage skill sources\n",

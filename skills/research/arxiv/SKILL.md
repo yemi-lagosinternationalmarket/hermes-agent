@@ -1,9 +1,10 @@
 ---
 name: arxiv
-description: Search and retrieve academic papers from arXiv using their free REST API. No API key needed. Search by keyword, author, category, or ID. Combine with web_extract or the ocr-and-documents skill to read full paper content.
+description: "Search arXiv papers by keyword, author, category, or ID."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
+platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Research, Arxiv, Papers, Academic, Science, API]
@@ -114,6 +115,7 @@ curl -s "https://export.arxiv.org/api/query?id_list=2402.03300,2401.12345,2403.0
 
 After fetching metadata for a paper, generate a BibTeX entry:
 
+{% raw %}
 ```bash
 curl -s "https://export.arxiv.org/api/query?id_list=1706.03762" | python3 -c "
 import sys, xml.etree.ElementTree as ET
@@ -139,6 +141,7 @@ print(f'  url       = {{https://arxiv.org/abs/{raw_id}}}')
 print('}')
 "
 ```
+{% endraw %}
 
 ## Reading Paper Content
 

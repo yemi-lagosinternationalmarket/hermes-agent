@@ -25,31 +25,19 @@ The Signal adapter uses `httpx` (already a core Hermes dependency) for all commu
 ### Installing signal-cli
 
 ```bash
-# Linux (Debian/Ubuntu)
-sudo apt install signal-cli
-
 # macOS
 brew install signal-cli
 
-# Manual install (any platform)
-# Download from https://github.com/AsamK/signal-cli/releases
-# Extract and add to PATH
+# Linux (download latest release)
+VERSION=$(curl -Ls -o /dev/null -w %{url_effective} \
+  https://github.com/AsamK/signal-cli/releases/latest | sed 's/^.*\/v//')
+curl -L -O "https://github.com/AsamK/signal-cli/releases/download/v${VERSION}/signal-cli-${VERSION}.tar.gz"
+sudo tar xf "signal-cli-${VERSION}.tar.gz" -C /opt
+sudo ln -sf "/opt/signal-cli-${VERSION}/bin/signal-cli" /usr/local/bin/
 ```
 
-### Alternative: Docker (signal-cli-rest-api)
-
-If you prefer Docker, use the [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) container:
-
-```bash
-docker run -d --name signal-cli \
-  -p 8080:8080 \
-  -v $HOME/.local/share/signal-cli:/home/.local/share/signal-cli \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api
-```
-
-:::tip
-Use `MODE=json-rpc` for best performance. The `normal` mode spawns a JVM per request and is much slower.
+:::caution
+signal-cli is **not** in apt or snap repositories. The Linux install above downloads directly from [GitHub releases](https://github.com/AsamK/signal-cli/releases).
 :::
 
 ---
@@ -127,7 +115,8 @@ Then start the gateway:
 
 ```bash
 hermes gateway              # Foreground
-hermes gateway install      # Install as a system service
+hermes gateway install      # Install as a user service
+sudo hermes gateway install --system   # Linux only: boot-time system service
 ```
 
 ---
@@ -158,13 +147,39 @@ Group access is controlled by the `SIGNAL_GROUP_ALLOWED_USERS` env var:
 
 ### Attachments
 
-The adapter supports sending and receiving:
+The adapter supports sending and receiving media in both directions.
+
+**Incoming** (user → agent):
 
 - **Images** — PNG, JPEG, GIF, WebP (auto-detected via magic bytes)
 - **Audio** — MP3, OGG, WAV, M4A (voice messages transcribed if Whisper is configured)
 - **Documents** — PDF, ZIP, and other file types
 
-Attachment size limit: **100 MB**.
+**Outgoing** (agent → user):
+
+The agent can send media files via `MEDIA:` tags in responses. The following delivery methods are supported:
+
+- **Images** — `send_multiple_images` and `send_image_file` send PNG, JPEG, GIF, WebP as native Signal attachments
+- **Voice** — `send_voice` sends audio files (OGG, MP3, WAV, M4A, AAC) as attachments
+- **Video** — `send_video` sends MP4 video files
+- **Documents** — `send_document` sends any file type (PDF, ZIP, etc.)
+
+All outgoing media goes through Signal's standard attachment API. Unlike some platforms, Signal does not distinguish between voice messages and file attachments at the protocol level.
+
+Attachment size limit: **100 MB** (both directions).
+:::warning
+**Signal servers will rate-limit attachment uploads**, the adapter uses a scheduler for multiple image sending that batches images in groups of 32 and throttles uploads to match the Signal server policy.
+:::
+
+### Native Formatting, Reply Quotes, and Reactions
+
+Signal messages render with **native formatting** instead of literal markdown characters. The adapter converts markdown (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `||spoiler||`, headings) into Signal `bodyRanges` so the text shows up with real styling on the recipient's client rather than as visible `**` / `` ` `` characters.
+
+**Reply quotes.** When Hermes replies to a specific message, it now posts a native reply that quotes the original — same UI affordance Signal users see when they use "Reply" themselves. This is automatic for replies generated in response to an inbound message.
+
+**Reactions.** The agent can react to messages via the standard reaction API; reactions surface in Signal as emoji reactions on the referenced message rather than as extra text.
+
+None of this requires additional config — it ships on by default in recent signal-cli builds. If your `signal-cli` version is too old, Hermes falls back to plaintext delivery and logs a one-time warning.
 
 ### Typing Indicators
 
@@ -175,6 +190,19 @@ The bot sends typing indicators while processing messages, refreshing every 8 se
 All phone numbers are automatically redacted in logs:
 - `+15551234567` → `+155****4567`
 - This applies to both Hermes gateway logs and the global redaction system
+
+### Note to Self (Single-Number Setup)
+
+If you run signal-cli as a **linked secondary device** on your own phone number (rather than a separate bot number), you can interact with Hermes through Signal's "Note to Self" feature.
+
+Just send a message to yourself from your phone — signal-cli picks it up and Hermes responds in the same conversation.
+
+**How it works:**
+- "Note to Self" messages arrive as `syncMessage.sentMessage` envelopes
+- The adapter detects when these are addressed to the bot's own account and processes them as regular inbound messages
+- Echo-back protection (sent-timestamp tracking) prevents infinite loops — the bot's own replies are filtered out automatically
+
+**No extra configuration needed.** This works automatically as long as `SIGNAL_ACCOUNT` matches your phone number.
 
 ### Health Monitoring
 
@@ -192,8 +220,8 @@ The adapter monitors the SSE connection and automatically reconnects if:
 | **Messages not received** | Check that `SIGNAL_ALLOWED_USERS` includes the sender's number in E.164 format (with `+` prefix) |
 | **"signal-cli not found on PATH"** | Install signal-cli and ensure it's in your PATH, or use Docker |
 | **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 17+ is installed. |
-| **Group messages ignored** | `SIGNAL_GROUP_POLICY` defaults to `disabled`. Set to `allowlist` or `open`. |
-| **Bot responds to everyone** | Set `SIGNAL_DM_POLICY=pairing` or `allowlist` and configure `SIGNAL_ALLOWED_USERS` |
+| **Group messages ignored** | Configure `SIGNAL_GROUP_ALLOWED_USERS` with specific group IDs, or `*` to allow all groups. |
+| **Bot responds to no one** | Configure `SIGNAL_ALLOWED_USERS`, use DM pairing, or explicitly allow all users through gateway policy if you want broader access. |
 | **Duplicate messages** | Ensure only one signal-cli instance is listening on your phone number |
 
 ---
@@ -205,8 +233,8 @@ The adapter monitors the SSE connection and automatically reconnects if:
 :::
 
 - Phone numbers are redacted in all log output
-- Use `SIGNAL_DM_POLICY=pairing` (default) for safe onboarding of new users
-- Keep groups disabled unless you specifically need group support
+- Use DM pairing or explicit allowlists for safe onboarding of new users
+- Keep groups disabled unless you specifically need group support, or allowlist only the groups you trust
 - Signal's end-to-end encryption protects message content in transit
 - The signal-cli session data in `~/.local/share/signal-cli/` contains account credentials — protect it like a password
 
@@ -220,4 +248,5 @@ The adapter monitors the SSE connection and automatically reconnects if:
 | `SIGNAL_ACCOUNT` | Yes | — | Bot phone number (E.164) |
 | `SIGNAL_ALLOWED_USERS` | No | — | Comma-separated phone numbers/UUIDs |
 | `SIGNAL_GROUP_ALLOWED_USERS` | No | — | Group IDs to monitor, or `*` for all (omit to disable groups) |
+| `SIGNAL_ALLOW_ALL_USERS` | No | `false` | Allow any user to interact (skip allowlist) |
 | `SIGNAL_HOME_CHANNEL` | No | — | Default delivery target for cron jobs |

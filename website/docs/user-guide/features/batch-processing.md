@@ -20,7 +20,7 @@ python batch_runner.py \
     --dataset_file=data/prompts.jsonl \
     --batch_size=10 \
     --run_name=my_first_run \
-    --model=anthropic/claude-sonnet-4-20250514 \
+    --model=anthropic/claude-sonnet-4.6 \
     --num_workers=4
 
 # Resume an interrupted run
@@ -56,7 +56,7 @@ Entries can optionally include:
 | `--batch_size` | (required) | Prompts per batch |
 | `--run_name` | (required) | Name for this run (used for output dir and checkpointing) |
 | `--distribution` | `"default"` | Toolset distribution to sample from |
-| `--model` | `claude-sonnet-4-20250514` | Model to use |
+| `--model` | `claude-sonnet-4.6` | Model to use |
 | `--base_url` | `https://openrouter.ai/api/v1` | API base URL |
 | `--api_key` | (env var) | API key for model |
 | `--max_turns` | `10` | Maximum tool-calling iterations per prompt |
@@ -79,7 +79,7 @@ Entries can optionally include:
 
 | Parameter | Description |
 |-----------|-------------|
-| `--reasoning_effort` | Effort level: `xhigh`, `high`, `medium`, `low`, `minimal`, `none` |
+| `--reasoning_effort` | Effort level: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--reasoning_disabled` | Completely disable reasoning/thinking tokens |
 
 ### Advanced Options
@@ -94,13 +94,13 @@ Entries can optionally include:
 
 Each prompt gets a randomly sampled set of toolsets from a **distribution**. This ensures training data covers diverse tool combinations. Use `--list_distributions` to see all available distributions.
 
-Distributions define probability weights for each toolset combination. For example, a "default" distribution might assign high probability to `["terminal", "file", "web"]` and lower probability to web-only or file-only combinations.
+In the current implementation, distributions assign a probability to **each individual toolset**. The sampler flips each toolset independently, then guarantees that at least one toolset is enabled. This is different from a hand-authored table of prebuilt combinations.
 
 ## Output Format
 
 All output goes to `data/<run_name>/`:
 
-```
+```text
 data/my_run/
 ├── trajectories.jsonl    # Combined final output (all batches merged)
 ├── batch_0.jsonl         # Individual batch results
@@ -127,7 +127,7 @@ Each line in `trajectories.jsonl` is a JSON object:
   "metadata": {
     "batch_num": 2,
     "timestamp": "2026-01-15T10:30:00",
-    "model": "anthropic/claude-sonnet-4-20250514"
+    "model": "anthropic/claude-sonnet-4.6"
   },
   "completed": true,
   "partial": false,
@@ -193,7 +193,7 @@ python batch_runner.py \
     --dataset_file=data/coding_prompts.jsonl \
     --batch_size=20 \
     --run_name=coding_v1 \
-    --model=anthropic/claude-sonnet-4-20250514 \
+    --model=anthropic/claude-sonnet-4.6 \
     --num_workers=8 \
     --distribution=default \
     --max_turns=15

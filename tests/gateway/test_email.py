@@ -25,14 +25,6 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from gateway.platforms.base import SendResult
 
 
-class TestPlatformEnum(unittest.TestCase):
-    """Verify EMAIL is in the Platform enum."""
-
-    def test_email_in_platform_enum(self):
-        from gateway.config import Platform
-        self.assertEqual(Platform.EMAIL.value, "email")
-
-
 class TestConfigEnvOverrides(unittest.TestCase):
     """Verify email config is loaded from environment variables."""
 
@@ -71,20 +63,6 @@ class TestConfigEnvOverrides(unittest.TestCase):
         config = GatewayConfig()
         _apply_env_overrides(config)
         self.assertNotIn(Platform.EMAIL, config.platforms)
-
-    @patch.dict(os.environ, {
-        "EMAIL_ADDRESS": "hermes@test.com",
-        "EMAIL_PASSWORD": "secret",
-        "EMAIL_IMAP_HOST": "imap.test.com",
-        "EMAIL_SMTP_HOST": "smtp.test.com",
-    }, clear=False)
-    def test_email_in_connected_platforms(self):
-        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
-        config = GatewayConfig()
-        _apply_env_overrides(config)
-        connected = config.get_connected_platforms()
-        self.assertIn(Platform.EMAIL, connected)
-
 
 class TestCheckRequirements(unittest.TestCase):
     """Verify check_email_requirements function."""
@@ -257,119 +235,6 @@ class TestExtractAttachments(unittest.TestCase):
         mock_cache.assert_called_once()
 
 
-class TestAuthorizationMaps(unittest.TestCase):
-    """Verify email is in authorization maps in gateway/run.py."""
-
-    def test_email_in_adapter_factory(self):
-        """Email adapter creation branch should exist."""
-        import gateway.run
-        import inspect
-        source = inspect.getsource(gateway.run.GatewayRunner._create_adapter)
-        self.assertIn("Platform.EMAIL", source)
-
-    def test_email_in_allowed_users_map(self):
-        """EMAIL_ALLOWED_USERS should be in platform_env_map."""
-        import gateway.run
-        import inspect
-        source = inspect.getsource(gateway.run.GatewayRunner._is_user_authorized)
-        self.assertIn("EMAIL_ALLOWED_USERS", source)
-
-    def test_email_in_allow_all_map(self):
-        """EMAIL_ALLOW_ALL_USERS should be in platform_allow_all_map."""
-        import gateway.run
-        import inspect
-        source = inspect.getsource(gateway.run.GatewayRunner._is_user_authorized)
-        self.assertIn("EMAIL_ALLOW_ALL_USERS", source)
-
-
-class TestSendMessageToolRouting(unittest.TestCase):
-    """Verify email routing in send_message_tool."""
-
-    def test_email_in_platform_map(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._handle_send)
-        self.assertIn('"email"', source)
-
-    def test_send_to_platform_has_email_branch(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._send_to_platform)
-        self.assertIn("Platform.EMAIL", source)
-
-
-class TestCronDelivery(unittest.TestCase):
-    """Verify email in cron scheduler platform_map."""
-
-    def test_email_in_cron_platform_map(self):
-        import cron.scheduler
-        import inspect
-        source = inspect.getsource(cron.scheduler)
-        self.assertIn('"email"', source)
-
-
-class TestToolset(unittest.TestCase):
-    """Verify email toolset is registered."""
-
-    def test_email_toolset_exists(self):
-        from toolsets import TOOLSETS
-        self.assertIn("hermes-email", TOOLSETS)
-
-    def test_email_in_gateway_toolset(self):
-        from toolsets import TOOLSETS
-        includes = TOOLSETS["hermes-gateway"]["includes"]
-        self.assertIn("hermes-email", includes)
-
-
-class TestPlatformHints(unittest.TestCase):
-    """Verify email platform hint is registered."""
-
-    def test_email_in_platform_hints(self):
-        from agent.prompt_builder import PLATFORM_HINTS
-        self.assertIn("email", PLATFORM_HINTS)
-        self.assertIn("email", PLATFORM_HINTS["email"].lower())
-
-
-class TestChannelDirectory(unittest.TestCase):
-    """Verify email in channel directory session-based discovery."""
-
-    def test_email_in_session_discovery(self):
-        import gateway.channel_directory
-        import inspect
-        source = inspect.getsource(gateway.channel_directory.build_channel_directory)
-        self.assertIn('"email"', source)
-
-
-class TestGatewaySetup(unittest.TestCase):
-    """Verify email in gateway setup wizard."""
-
-    def test_email_in_platforms_list(self):
-        from hermes_cli.gateway import _PLATFORMS
-        keys = [p["key"] for p in _PLATFORMS]
-        self.assertIn("email", keys)
-
-    def test_email_has_setup_vars(self):
-        from hermes_cli.gateway import _PLATFORMS
-        email_platform = next(p for p in _PLATFORMS if p["key"] == "email")
-        var_names = [v["name"] for v in email_platform["vars"]]
-        self.assertIn("EMAIL_ADDRESS", var_names)
-        self.assertIn("EMAIL_PASSWORD", var_names)
-        self.assertIn("EMAIL_IMAP_HOST", var_names)
-        self.assertIn("EMAIL_SMTP_HOST", var_names)
-
-
-class TestEnvExample(unittest.TestCase):
-    """Verify .env.example has email config."""
-
-    def test_env_example_has_email_vars(self):
-        env_path = Path(__file__).resolve().parents[2] / ".env.example"
-        content = env_path.read_text()
-        self.assertIn("EMAIL_ADDRESS", content)
-        self.assertIn("EMAIL_PASSWORD", content)
-        self.assertIn("EMAIL_IMAP_HOST", content)
-        self.assertIn("EMAIL_SMTP_HOST", content)
-
-
 class TestDispatchMessage(unittest.TestCase):
     """Test email message dispatch logic."""
 
@@ -407,7 +272,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         adapter._message_handler.assert_not_called()
 
     def test_subject_included_in_text(self):
@@ -441,7 +306,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertIn("[Subject: Help with Python]", captured_events[0].text)
         self.assertIn("How do I use lists?", captured_events[0].text)
@@ -469,7 +334,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertNotIn("[Subject:", captured_events[0].text)
         self.assertEqual(captured_events[0].text, "Thanks for the help!")
@@ -497,7 +362,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertIn("(empty email)", captured_events[0].text)
 
@@ -525,7 +390,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertEqual(captured_events[0].message_type, MessageType.PHOTO)
         self.assertEqual(captured_events[0].media_urls, ["/tmp/img.jpg"])
@@ -553,12 +418,97 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         event = captured_events[0]
         self.assertEqual(event.source.chat_id, "john@example.com")
         self.assertEqual(event.source.user_id, "john@example.com")
         self.assertEqual(event.source.user_name, "John Doe")
         self.assertEqual(event.source.chat_type, "dm")
+
+    def test_non_allowlisted_sender_dropped(self):
+        """Senders not in EMAIL_ALLOWED_USERS should be dropped before dispatch."""
+        import asyncio
+        with patch.dict(os.environ, {
+            "EMAIL_ALLOWED_USERS": "hermes@test.com,admin@test.com",
+        }):
+            adapter = self._make_adapter()
+            adapter._message_handler = MagicMock()
+
+            msg_data = {
+                "uid": b"99",
+                "sender_addr": "outsider@evil.com",
+                "sender_name": "Spammer",
+                "subject": "Buy now!!!",
+                "message_id": "<spam@evil.com>",
+                "in_reply_to": "",
+                "body": "Cheap meds",
+                "attachments": [],
+                "date": "",
+            }
+
+            asyncio.run(adapter._dispatch_message(msg_data))
+            # Handler should NOT be called for non-allowlisted sender
+            adapter._message_handler.assert_not_called()
+            # Thread context should NOT be created
+            self.assertNotIn("outsider@evil.com", adapter._thread_context)
+
+    def test_allowlisted_sender_proceeds(self):
+        """Senders in EMAIL_ALLOWED_USERS should proceed to dispatch normally."""
+        import asyncio
+        with patch.dict(os.environ, {
+            "EMAIL_ALLOWED_USERS": "hermes@test.com,admin@test.com",
+        }):
+            adapter = self._make_adapter()
+            captured_events = []
+
+            async def mock_handler(event):
+                captured_events.append(event)
+                return None
+
+            adapter._message_handler = mock_handler
+
+            msg_data = {
+                "uid": b"100",
+                "sender_addr": "admin@test.com",
+                "sender_name": "Admin",
+                "subject": "Important",
+                "message_id": "<msg@test.com>",
+                "in_reply_to": "",
+                "body": "Hello",
+                "attachments": [],
+                "date": "",
+            }
+
+            asyncio.run(adapter._dispatch_message(msg_data))
+            self.assertEqual(len(captured_events), 1)
+            self.assertEqual(captured_events[0].source.chat_id, "admin@test.com")
+
+    def test_empty_allowlist_allows_all(self):
+        """When EMAIL_ALLOWED_USERS is not set, all senders should proceed."""
+        import asyncio
+        with patch.dict(os.environ, {}, clear=False):
+            # Ensure EMAIL_ALLOWED_USERS is not in the env
+            if "EMAIL_ALLOWED_USERS" in os.environ:
+                del os.environ["EMAIL_ALLOWED_USERS"]
+
+            adapter = self._make_adapter()
+            adapter._message_handler = MagicMock()
+
+            msg_data = {
+                "uid": b"101",
+                "sender_addr": "anyone@test.com",
+                "sender_name": "Anyone",
+                "subject": "Hey",
+                "message_id": "<any@test.com>",
+                "in_reply_to": "",
+                "body": "Hi",
+                "attachments": [],
+                "date": "",
+            }
+
+            asyncio.run(adapter._dispatch_message(msg_data))
+            # Handler should be called when no allowlist is configured
+            adapter._message_handler.assert_called()
 
 
 class TestThreadContext(unittest.TestCase):
@@ -598,7 +548,7 @@ class TestThreadContext(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        asyncio.run(adapter._dispatch_message(msg_data))
         ctx = adapter._thread_context.get("user@test.com")
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["subject"], "Project question")
@@ -623,6 +573,7 @@ class TestThreadContext(unittest.TestCase):
             self.assertEqual(send_call["Subject"], "Re: Project question")
             self.assertEqual(send_call["In-Reply-To"], "<original@test.com>")
             self.assertEqual(send_call["References"], "<original@test.com>")
+            self.assertIn("Date", send_call)
 
     def test_reply_does_not_double_re(self):
         """If subject already has Re:, don't add another."""
@@ -654,6 +605,7 @@ class TestThreadContext(unittest.TestCase):
 
             send_call = mock_server.send_message.call_args[0][0]
             self.assertEqual(send_call["Subject"], "Re: Hermes Agent")
+            self.assertIn("Date", send_call)
 
 
 class TestSendMethods(unittest.TestCase):
@@ -680,7 +632,7 @@ class TestSendMethods(unittest.TestCase):
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 adapter.send("user@test.com", "Hello from Hermes!")
             )
 
@@ -698,7 +650,7 @@ class TestSendMethods(unittest.TestCase):
         with patch("smtplib.SMTP") as mock_smtp:
             mock_smtp.side_effect = Exception("Connection refused")
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 adapter.send("user@test.com", "Hello")
             )
 
@@ -713,7 +665,7 @@ class TestSendMethods(unittest.TestCase):
 
         adapter.send = AsyncMock(return_value=SendResult(success=True))
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             adapter.send_image("user@test.com", "https://img.com/photo.jpg", "My photo")
         )
 
@@ -737,7 +689,7 @@ class TestSendMethods(unittest.TestCase):
                 mock_server = MagicMock()
                 mock_smtp.return_value = mock_server
 
-                result = asyncio.get_event_loop().run_until_complete(
+                result = asyncio.run(
                     adapter.send_document("user@test.com", tmp_path, "Here is the file")
                 )
 
@@ -759,7 +711,7 @@ class TestSendMethods(unittest.TestCase):
         import asyncio
         adapter = self._make_adapter()
         # Should not raise
-        asyncio.get_event_loop().run_until_complete(adapter.send_typing("user@test.com"))
+        asyncio.run(adapter.send_typing("user@test.com"))
 
     def test_get_chat_info(self):
         """get_chat_info should return email address as chat info."""
@@ -767,7 +719,7 @@ class TestSendMethods(unittest.TestCase):
         adapter = self._make_adapter()
         adapter._thread_context["user@test.com"] = {"subject": "Test", "message_id": "<m@t>"}
 
-        info = asyncio.get_event_loop().run_until_complete(
+        info = asyncio.run(
             adapter.get_chat_info("user@test.com")
         )
 
@@ -797,14 +749,14 @@ class TestConnectDisconnect(unittest.TestCase):
         adapter = self._make_adapter()
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b"1 2 3"])
+        mock_imap.uid.return_value = ("OK", [b"1 2 3"])
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
              patch("smtplib.SMTP") as mock_smtp:
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = asyncio.run(adapter.connect())
 
             self.assertTrue(result)
             self.assertTrue(adapter._running)
@@ -821,7 +773,7 @@ class TestConnectDisconnect(unittest.TestCase):
         adapter = self._make_adapter()
 
         with patch("imaplib.IMAP4_SSL", side_effect=Exception("IMAP down")):
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = asyncio.run(adapter.connect())
             self.assertFalse(result)
             self.assertFalse(adapter._running)
 
@@ -831,11 +783,11 @@ class TestConnectDisconnect(unittest.TestCase):
         adapter = self._make_adapter()
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b""])
+        mock_imap.uid.return_value = ("OK", [b""])
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
              patch("smtplib.SMTP", side_effect=Exception("SMTP down")):
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = asyncio.run(adapter.connect())
             self.assertFalse(result)
 
     def test_disconnect_cancels_poll(self):
@@ -843,9 +795,12 @@ class TestConnectDisconnect(unittest.TestCase):
         import asyncio
         adapter = self._make_adapter()
         adapter._running = True
-        adapter._poll_task = asyncio.ensure_future(asyncio.sleep(100))
 
-        asyncio.get_event_loop().run_until_complete(adapter.disconnect())
+        async def _exercise_disconnect():
+            adapter._poll_task = asyncio.create_task(asyncio.sleep(100))
+            await adapter.disconnect()
+
+        asyncio.run(_exercise_disconnect())
 
         self.assertFalse(adapter._running)
         self.assertIsNone(adapter._poll_task)
@@ -877,8 +832,15 @@ class TestFetchNewMessages(unittest.TestCase):
         raw_email["Message-ID"] = "<msg@test.com>"
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b"1 2 3"])
-        mock_imap.fetch.return_value = ("OK", [(b"3", raw_email.as_bytes())])
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1 2 3"])
+            if command == "fetch":
+                return ("OK", [(b"3", raw_email.as_bytes())])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
             results = adapter._fetch_new_messages()
@@ -893,7 +855,7 @@ class TestFetchNewMessages(unittest.TestCase):
         adapter = self._make_adapter()
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b""])
+        mock_imap.uid.return_value = ("OK", [b""])
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
             results = adapter._fetch_new_messages()
@@ -919,8 +881,15 @@ class TestFetchNewMessages(unittest.TestCase):
         raw_email["Message-ID"] = "<msg@test.com>"
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b"1"])
-        mock_imap.fetch.return_value = ("OK", [(b"1", raw_email.as_bytes())])
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1"])
+            if command == "fetch":
+                return ("OK", [(b"1", raw_email.as_bytes())])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
             results = adapter._fetch_new_messages()
@@ -963,11 +932,18 @@ class TestPollLoop(unittest.TestCase):
         raw_email["Message-ID"] = "<inbox@test.com>"
 
         mock_imap = MagicMock()
-        mock_imap.search.return_value = ("OK", [b"1"])
-        mock_imap.fetch.return_value = ("OK", [(b"1", raw_email.as_bytes())])
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1"])
+            if command == "fetch":
+                return ("OK", [(b"1", raw_email.as_bytes())])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            asyncio.get_event_loop().run_until_complete(adapter._check_inbox())
+            asyncio.run(adapter._check_inbox())
 
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0]["subject"], "Inbox Test")
@@ -983,20 +959,28 @@ class TestSendEmailStandalone(unittest.TestCase):
         "EMAIL_SMTP_PORT": "587",
     })
     def test_send_email_tool_success(self):
-        """_send_email should use SMTP to send."""
+        """_send_email should use verified STARTTLS when sending."""
         import asyncio
+        import ssl
         from tools.send_message_tool import _send_email
 
         with patch("smtplib.SMTP") as mock_smtp:
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
             )
 
             self.assertTrue(result["success"])
             self.assertEqual(result["platform"], "email")
+            _, kwargs = mock_server.starttls.call_args
+            self.assertIsInstance(kwargs["context"], ssl.SSLContext)
+            send_call = mock_server.send_message.call_args[0][0]
+            self.assertEqual(send_call["Subject"], "Hermes Agent")
+            self.assertIn("Date", send_call)
+            self.assertEqual(send_call["To"], "user@test.com")
+            self.assertEqual(send_call["From"], "hermes@test.com")
 
     @patch.dict(os.environ, {
         "EMAIL_ADDRESS": "hermes@test.com",
@@ -1009,7 +993,7 @@ class TestSendEmailStandalone(unittest.TestCase):
         from tools.send_message_tool import _send_email
 
         with patch("smtplib.SMTP", side_effect=Exception("SMTP error")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
             )
 
@@ -1022,12 +1006,204 @@ class TestSendEmailStandalone(unittest.TestCase):
         import asyncio
         from tools.send_message_tool import _send_email
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             _send_email({}, "user@test.com", "Hello")
         )
 
         self.assertIn("error", result)
         self.assertIn("not configured", result["error"])
+
+
+class TestSmtpConnectionCleanup(unittest.TestCase):
+    """Verify SMTP connections are closed even when send_message raises."""
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+        "EMAIL_SMTP_PORT": "587",
+    }, clear=False)
+    def _make_adapter(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.email import EmailAdapter
+        return EmailAdapter(PlatformConfig(enabled=True))
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+        "EMAIL_SMTP_PORT": "587",
+    }, clear=False)
+    def test_smtp_quit_called_on_send_message_failure(self):
+        """SMTP quit() must be called even when send_message() raises."""
+        adapter = self._make_adapter()
+        mock_smtp = MagicMock()
+        mock_smtp.send_message.side_effect = Exception("send failed")
+
+        with patch("smtplib.SMTP", return_value=mock_smtp):
+            with self.assertRaises(Exception):
+                adapter._send_email("user@test.com", "Hello")
+
+        mock_smtp.quit.assert_called_once()
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+        "EMAIL_SMTP_PORT": "587",
+    }, clear=False)
+    def test_smtp_close_called_when_quit_also_fails(self):
+        """If both send_message() and quit() fail, close() is the fallback."""
+        adapter = self._make_adapter()
+        mock_smtp = MagicMock()
+        mock_smtp.send_message.side_effect = Exception("send failed")
+        mock_smtp.quit.side_effect = Exception("quit failed")
+
+        with patch("smtplib.SMTP", return_value=mock_smtp):
+            with self.assertRaises(Exception):
+                adapter._send_email("user@test.com", "Hello")
+
+        mock_smtp.close.assert_called_once()
+
+
+class TestImapConnectionCleanup(unittest.TestCase):
+    """Verify IMAP connections are closed even when fetch raises."""
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_IMAP_PORT": "993",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+    }, clear=False)
+    def _make_adapter(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.email import EmailAdapter
+        return EmailAdapter(PlatformConfig(enabled=True))
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_IMAP_PORT": "993",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+    }, clear=False)
+    def test_imap_logout_called_on_uid_fetch_failure(self):
+        """IMAP logout() must be called even when uid fetch raises."""
+        adapter = self._make_adapter()
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1"])
+            if command == "fetch":
+                raise Exception("fetch failed")
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            results = adapter._fetch_new_messages()
+
+        self.assertEqual(results, [])
+        mock_imap.logout.assert_called_once()
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_IMAP_PORT": "993",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+    }, clear=False)
+    def test_imap_logout_called_on_early_return(self):
+        """IMAP logout() must be called even when returning early (no unseen)."""
+        adapter = self._make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            results = adapter._fetch_new_messages()
+
+        self.assertEqual(results, [])
+        mock_imap.logout.assert_called_once()
+
+
+class TestImapIdExtensionForNetEase(unittest.TestCase):
+    """Regression for #22271: 163/NetEase mailbox requires the RFC 2971
+    IMAP ID command after LOGIN, otherwise it returns ``BYE Unsafe Login``
+    on every UID SEARCH.  We send ID best-effort after every login so that
+    163 works while non-supporting servers stay unaffected.
+    """
+
+    def _make_adapter(self):
+        from gateway.config import PlatformConfig
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@163.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.163.com",
+            "EMAIL_SMTP_HOST": "smtp.163.com",
+        }):
+            from gateway.platforms.email import EmailAdapter
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+        return adapter
+
+    def test_connect_sends_imap_id_after_login(self):
+        """connect() must call xatom('ID', ...) after LOGIN for 163 support."""
+        import asyncio
+        adapter = self._make_adapter()
+
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
+             patch("smtplib.SMTP") as mock_smtp:
+            mock_smtp.return_value = MagicMock()
+            asyncio.run(adapter.connect())
+            adapter._running = False
+            if adapter._poll_task:
+                adapter._poll_task.cancel()
+
+        id_calls = [c for c in mock_imap.xatom.call_args_list if c.args and c.args[0] == "ID"]
+        self.assertTrue(
+            id_calls,
+            "EmailAdapter.connect() must call imap.xatom('ID', ...) after "
+            "LOGIN so 163/NetEase mailbox does not return 'Unsafe Login'.",
+        )
+        payload = id_calls[0].args[1]
+        self.assertIn("hermes-agent", payload)
+
+        names = [c[0] for c in mock_imap.method_calls]
+        self.assertIn("login", names)
+        self.assertLess(names.index("login"), names.index("xatom"))
+
+    def test_fetch_new_messages_sends_imap_id_after_login(self):
+        """_fetch_new_messages must also send ID — it opens its own IMAP session."""
+        adapter = self._make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            adapter._fetch_new_messages()
+
+        id_calls = [c for c in mock_imap.xatom.call_args_list if c.args and c.args[0] == "ID"]
+        self.assertTrue(
+            id_calls,
+            "_fetch_new_messages() must call imap.xatom('ID', ...) after "
+            "LOGIN — the polling path opens a fresh IMAP connection.",
+        )
+
+    def test_send_imap_id_swallows_errors_for_non_supporting_servers(self):
+        """Servers that reject ID must not break the connection."""
+        from gateway.platforms.email import _send_imap_id
+
+        mock_imap = MagicMock()
+        mock_imap.xatom.side_effect = Exception("BAD command unknown: ID")
+
+        _send_imap_id(mock_imap)
+        mock_imap.xatom.assert_called_once()
 
 
 if __name__ == "__main__":

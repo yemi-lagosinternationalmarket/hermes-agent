@@ -10,12 +10,14 @@ Cache location: ~/.hermes/sticker_cache.json
 
 import json
 import os
+import tempfile
 import time
-from pathlib import Path
 from typing import Optional
 
+from hermes_cli.config import get_hermes_home
 
-CACHE_PATH = Path(os.path.expanduser("~/.hermes/sticker_cache.json"))
+
+CACHE_PATH = get_hermes_home() / "sticker_cache.json"
 
 # Vision prompt for describing stickers -- kept concise to save tokens
 STICKER_VISION_PROMPT = (
@@ -35,12 +37,23 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    """Save the sticker cache to disk."""
+    """Save the sticker cache to disk atomically."""
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(
-        json.dumps(cache, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(CACHE_PATH.parent), suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, str(CACHE_PATH))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_cached_description(file_unique_id: str) -> Optional[dict]:
