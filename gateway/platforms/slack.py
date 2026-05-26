@@ -70,6 +70,9 @@ class _ThreadContextCache:
     fetched_at: float = field(default_factory=time.monotonic)
     message_count: int = 0
     parent_text: str = ""  # Raw text of the thread parent (for reply_to_text injection)
+    media_urls: List[str] = field(default_factory=list)
+    media_types: List[str] = field(default_factory=list)
+    attachment_notices: List[str] = field(default_factory=list)
 
 
 def check_slack_requirements() -> bool:
@@ -348,6 +351,26 @@ class SlackAdapter(BasePlatformAdapter):
         # (channel_id, user_id) to avoid cross-user collisions.
         # Each value: {"response_url": str, "ts": float}
         self._slash_command_contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Optional operational router for LIM product intake. Loaded lazily so
+        # Slack remains usable if the router config is absent or disabled.
+        self._lim_slack_router: Optional[Any] = None
+
+    def _get_lim_slack_router(self) -> Optional[Any]:
+        cached = getattr(self, "_lim_slack_router", None)
+        if cached is not None:
+            return cached
+        try:
+            from hermes_cli.config import load_config
+            from gateway.lim_slack_router import LimSlackRouter, load_router_config
+
+            router_config = load_router_config(load_config())
+            if not router_config.enabled:
+                return None
+            self._lim_slack_router = LimSlackRouter(router_config)
+            return self._lim_slack_router
+        except Exception:
+            logger.warning("[Slack] Failed to initialize LIM Slack router", exc_info=True)
+            return None
 
     def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Convert Slack API auth/permission failures into actionable user-facing text."""
@@ -680,6 +703,28 @@ class SlackAdapter(BasePlatformAdapter):
                 "hermes_confirm_cancel",
             ):
                 self._app.action(_action_id)(self._handle_slash_confirm_action)
+            # Forward unhandled events/actions to the Work Objects HTTP service
+            import httpx as _httpx
+            _wo_url = "http://127.0.0.1:9120"
+
+            @self._app.action(_re.compile(r".*"))
+            async def _forward_block_action(ack, body):
+                await ack()
+                try:
+                    async with _httpx.AsyncClient() as c:
+                        await c.post(f"{_wo_url}/slack/interactions", data={"payload": json.dumps(body)}, timeout=5)
+                except Exception as e:
+                    logger.debug("[Slack] Forward block action failed: %s", e)
+
+            @self._app.event("entity_details_requested")
+            async def _forward_entity_details(body):
+                logger.info("[Slack] entity_details_requested received, forwarding to %s", _wo_url)
+                try:
+                    async with _httpx.AsyncClient() as c:
+                        resp = await c.post(f"{_wo_url}/slack/events", json=body, timeout=5)
+                        logger.info("[Slack] entity_details forward response: %s", resp.status_code)
+                except Exception as e:
+                    logger.warning("[Slack] Forward entity_details failed: %s", e)
 
             # Start Socket Mode handler in background
             self._handler = AsyncSocketModeHandler(self._app, app_token, proxy=proxy_url)
@@ -1962,6 +2007,21 @@ class SlackAdapter(BasePlatformAdapter):
         event_thread_ts = event.get("thread_ts")
         is_thread_reply = bool(event_thread_ts and event_thread_ts != ts)
 
+        if not is_dm:
+            lim_router = self._get_lim_slack_router()
+            if lim_router is not None:
+                try:
+                    lim_consumed = await lim_router.inspect_slack_message(
+                        event,
+                        slack_client=self._get_client(channel_id),
+                        adapter=self,
+                        bot_user_id=bot_uid,
+                    )
+                    if lim_consumed:
+                        return
+                except Exception:
+                    logger.warning("[Slack] LIM Slack router failed during inspect", exc_info=True)
+
         if not is_dm and bot_uid:
             # Check allowed channels — if set, only respond in these channels (whitelist)
             allowed_channels = self._slack_allowed_channels()
@@ -2008,6 +2068,10 @@ class SlackAdapter(BasePlatformAdapter):
                     for t in to_remove:
                         self._mentioned_threads.discard(t)
 
+        media_urls = []
+        media_types = []
+        attachment_notices: List[str] = []
+
         # When entering a thread for the first time (no existing session),
         # fetch thread context so the agent understands the conversation.
         if is_thread_reply and not self._has_active_session_for_thread(
@@ -2023,6 +2087,12 @@ class SlackAdapter(BasePlatformAdapter):
             )
             if thread_context:
                 text = thread_context + text
+            cache_key = f"{channel_id}:{event_thread_ts}:{team_id}"
+            cached_context = self._thread_context_cache.get(cache_key)
+            if cached_context:
+                media_urls.extend(cached_context.media_urls)
+                media_types.extend(cached_context.media_types)
+                attachment_notices.extend(cached_context.attachment_notices)
 
         # Determine message type
         msg_type = MessageType.TEXT
@@ -2030,9 +2100,6 @@ class SlackAdapter(BasePlatformAdapter):
             msg_type = MessageType.COMMAND
 
         # Handle file attachments
-        media_urls = []
-        media_types = []
-        attachment_notices: List[str] = []
         files = event.get("files", [])
         for f in files:
             # Slack Connect channels return stub file objects with
@@ -2576,6 +2643,71 @@ class SlackAdapter(BasePlatformAdapter):
 
     # ----- Thread context fetching -----
 
+    async def _cache_image_files_from_slack_message(
+        self,
+        *,
+        files: List[Dict[str, Any]],
+        channel_id: str,
+        team_id: str = "",
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Download image attachments from a Slack message into Hermes' media cache."""
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        attachment_notices: List[str] = []
+
+        for file_obj in files or []:
+            f = file_obj
+            if f.get("file_access") == "check_file_info":
+                file_id = f.get("id")
+                if not file_id:
+                    continue
+                try:
+                    info_resp = await self._get_client(channel_id).files_info(file=file_id)
+                    if info_resp.get("ok"):
+                        f = info_resp["file"]
+                    else:
+                        detail = self._describe_slack_api_error(info_resp, file_obj=f)
+                        if detail:
+                            attachment_notices.append(detail)
+                            logger.warning("[Slack] %s", detail)
+                        else:
+                            logger.warning(
+                                "[Slack] files.info failed for %s: %s",
+                                file_id, info_resp.get("error"),
+                            )
+                        continue
+                except Exception as e:
+                    response = getattr(e, "response", None)
+                    detail = self._describe_slack_api_error(response, file_obj=f)
+                    if detail:
+                        attachment_notices.append(detail)
+                        logger.warning("[Slack] %s", detail)
+                    else:
+                        logger.warning("[Slack] files.info error for %s: %s", file_id, e, exc_info=True)
+                    continue
+
+            mimetype = f.get("mimetype", "unknown")
+            url = f.get("url_private_download") or f.get("url_private", "")
+            if not mimetype.startswith("image/") or not url:
+                continue
+
+            try:
+                ext = "." + mimetype.split("/")[-1].split(";")[0]
+                if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+                    ext = ".jpg"
+                cached = await self._download_slack_file(url, ext, team_id=team_id)
+                media_urls.append(cached)
+                media_types.append(mimetype)
+            except Exception as e:  # pragma: no cover - defensive logging
+                detail = self._describe_slack_download_failure(e, file_obj=f)
+                if detail:
+                    attachment_notices.append(detail)
+                    logger.warning("[Slack] %s", detail)
+                else:
+                    logger.warning("[Slack] Failed to cache image from %s: %s", url, e, exc_info=True)
+
+        return media_urls, media_types, attachment_notices
+
     async def _fetch_thread_context(
         self, channel_id: str, thread_ts: str, current_ts: str,
         team_id: str = "", limit: int = 30,
@@ -2643,6 +2775,9 @@ class SlackAdapter(BasePlatformAdapter):
             bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
             context_parts = []
             parent_text = ""
+            thread_media_urls: List[str] = []
+            thread_media_types: List[str] = []
+            thread_attachment_notices: List[str] = []
             for msg in messages:
                 msg_ts = msg.get("ts", "")
                 # Exclude the current triggering message — it will be delivered
@@ -2676,8 +2811,6 @@ class SlackAdapter(BasePlatformAdapter):
                     continue
 
                 msg_text = msg.get("text", "").strip()
-                if not msg_text:
-                    continue
 
                 # Strip bot mentions from context messages
                 if bot_uid:
@@ -2689,6 +2822,25 @@ class SlackAdapter(BasePlatformAdapter):
                 if is_bot and not display_user:
                     display_user = msg.get("username") or "bot"
                 name = await self._resolve_user_name(display_user, chat_id=channel_id)
+                msg_media_urls, msg_media_types, msg_attachment_notices = await self._cache_image_files_from_slack_message(
+                    files=msg.get("files", []),
+                    channel_id=channel_id,
+                    team_id=msg.get("team") or team_id,
+                )
+                if msg_media_urls:
+                    thread_media_urls.extend(msg_media_urls)
+                    thread_media_types.extend(msg_media_types)
+                    attachment_label = "image" if len(msg_media_urls) == 1 else f"{len(msg_media_urls)} images"
+                    if msg_text:
+                        msg_text = f"{msg_text} [attached {attachment_label}]"
+                    else:
+                        msg_text = f"[attached {attachment_label}]"
+                if msg_attachment_notices:
+                    thread_attachment_notices.extend(msg_attachment_notices)
+
+                if not msg_text:
+                    continue
+
                 context_parts.append(f"{prefix}{name}: {msg_text}")
                 if is_parent:
                     parent_text = msg_text
@@ -2706,6 +2858,9 @@ class SlackAdapter(BasePlatformAdapter):
                 fetched_at=now,
                 message_count=len(context_parts),
                 parent_text=parent_text,
+                media_urls=thread_media_urls,
+                media_types=thread_media_types,
+                attachment_notices=thread_attachment_notices,
             )
             return content
 
